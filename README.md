@@ -4,6 +4,9 @@ This crate contains a Rust API that forks `/usr/bin/skopeo` and
 talks to it via a custom API.  You can use it to fetch container
 images in a streaming fashion.
 
+At the time of this writing, you will need a version of skopeo with
+https://github.com/containers/skopeo/pull/1476
+
 # Why?
 
 First, assume one is operating on a codebase that isn't Go, but wants
