@@ -1,0 +1,49 @@
+# This is copied from https://github.com/rust-analyzer/rust-analyzer/blob/master/.github/workflows/ci.yaml
+name: CI
+on:
+  pull_request:
+  push:
+    branches:
+    - main
+    - ci-test
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  CI: 1
+  RUST_BACKTRACE: short
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        fetch-depth: 20
+
+    - name: Install Rust toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        profile: minimal
+        override: true
+        components: rustfmt, rust-src
+
+    - name: Cache Dependencies
+      uses: Swatinem/rust-cache@ce325b60658c1b38465c06cc965b79baf32c1e72
+
+    - name: Compile
+      run: cargo test --no-run --locked
+
+    - name: Test
+      run: cargo test -- --nocapture --quiet
