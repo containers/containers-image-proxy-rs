@@ -117,23 +117,14 @@ impl ImageProxy {
         let mut c = tokio::process::Command::from(c);
         c.kill_on_drop(true);
         let child = c.spawn().context("Failed to spawn skopeo")?;
-        let mut childwait = Box::pin(child.wait_with_output());
+        let childwait = Box::pin(child.wait_with_output());
 
         let sockfd = Arc::new(Mutex::new(mysock));
 
+        let mut r = Self { sockfd, childwait };
+
         // Verify semantic version
-        let protoreq =
-            Self::impl_request_raw::<String>(Arc::clone(&sockfd), Request::new_bare("Initialize"));
-        let protover = tokio::select! {
-            r = protoreq => {
-                r?.0
-            }
-            r = &mut childwait => {
-                let r = r?;
-                let stderr = String::from_utf8_lossy(&r.stderr);
-                return Err(anyhow!("skopeo exited unexpectedly (no support for `experimental-image-proxy`?): {}\n{}", r.status, stderr));
-            }
-        };
+        let protover = r.impl_request::<String, _, ()>("Initialize", []).await?.0;
         let protover = semver::Version::parse(protover.as_str())?;
         let supported = &*SUPPORTED_PROTO_VERSION;
         if !supported.matches(&protover) {
@@ -144,7 +135,6 @@ impl ImageProxy {
             ));
         }
 
-        let r = Self { sockfd, childwait };
         Ok(r)
     }
 
