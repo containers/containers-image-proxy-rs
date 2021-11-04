@@ -5,7 +5,7 @@
 //! More information: <https://github.com/containers/skopeo/pull/1476>
 
 use anyhow::{anyhow, Context, Result};
-use futures_util::{Future, FutureExt, TryFutureExt};
+use futures_util::Future;
 use nix::sys::socket::{self as nixsocket, ControlMessageOwned};
 use nix::sys::uio::IoVec;
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::{FromRawFd, RawFd};
 use std::pin::Pin;
-use std::process::{ExitStatus, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufRead, AsyncReadExt};
 
@@ -65,13 +65,12 @@ struct Reply {
     value: serde_json::Value,
 }
 
-type JoinFuture<T> = Pin<Box<dyn Future<Output = Result<Result<T>>>>>;
+type ChildFuture = Pin<Box<dyn Future<Output = std::io::Result<std::process::Output>>>>;
 
 /// Manage a child process proxy to fetch container images.
 pub struct ImageProxy {
     sockfd: Arc<Mutex<File>>,
-    stderr: JoinFuture<String>,
-    procwait: Pin<Box<dyn Future<Output = Result<ExitStatus>>>>,
+    childwait: ChildFuture,
 }
 
 impl std::fmt::Debug for ImageProxy {
@@ -117,20 +116,8 @@ impl ImageProxy {
         c.stdin(Stdio::from(theirsock));
         let mut c = tokio::process::Command::from(c);
         c.kill_on_drop(true);
-        let mut proc = c.spawn().context("Failed to spawn skopeo")?;
-
-        // Safety: We passed `Stdio::piped()` above
-        let mut child_stderr = proc.stderr.take().unwrap();
-
-        let stderr = tokio::spawn(async move {
-            let mut buf = String::new();
-            child_stderr.read_to_string(&mut buf).await?;
-            Ok(buf)
-        })
-        .map_err(anyhow::Error::msg)
-        .boxed();
-
-        let mut procwait = Box::pin(async move { proc.wait().map_err(anyhow::Error::msg).await });
+        let child = c.spawn().context("Failed to spawn skopeo")?;
+        let mut childwait = Box::pin(child.wait_with_output());
 
         let sockfd = Arc::new(Mutex::new(mysock));
 
@@ -141,9 +128,10 @@ impl ImageProxy {
             r = protoreq => {
                 r?.0
             }
-            r = &mut procwait => {
-                let errmsg = stderr.await??;
-                return Err(anyhow!("skopeo exited unexpectedly (no support for `experimental-image-proxy`?): {}\n{}", r?, errmsg));
+            r = &mut childwait => {
+                let r = r?;
+                let stderr = String::from_utf8_lossy(&r.stderr);
+                return Err(anyhow!("skopeo exited unexpectedly (no support for `experimental-image-proxy`?): {}\n{}", r.status, stderr));
             }
         };
         let protover = semver::Version::parse(protover.as_str())?;
@@ -156,11 +144,7 @@ impl ImageProxy {
             ));
         }
 
-        let r = Self {
-            stderr,
-            sockfd,
-            procwait,
-        };
+        let r = Self { sockfd, childwait };
         Ok(r)
     }
 
@@ -225,8 +209,17 @@ impl ImageProxy {
         T: IntoIterator<Item = I>,
         I: Into<serde_json::Value>,
     {
-        let req = Request::new(method, args);
-        Self::impl_request_raw(Arc::clone(&self.sockfd), req).await
+        let req = Self::impl_request_raw(Arc::clone(&self.sockfd), Request::new(method, args));
+        tokio::select! {
+            r = req => {
+                Ok(r?)
+            }
+            r = &mut self.childwait => {
+                let r = r?;
+                let stderr = String::from_utf8_lossy(&r.stderr);
+                return Err(anyhow::anyhow!("proxy unexpectedly exited during request method {}: {}\n{}", method, r.status, stderr))
+            }
+        }
     }
 
     async fn finish_pipe(&mut self, pipeid: u32) -> Result<()> {
@@ -293,13 +286,10 @@ impl ImageProxy {
         let sockfd = Arc::try_unwrap(self.sockfd).unwrap().into_inner().unwrap();
         nixsocket::send(sockfd.as_raw_fd(), &sendbuf, nixsocket::MsgFlags::empty())?;
         drop(sendbuf);
-        let status = self.procwait.await?;
-        if !status.success() {
-            if let Some(stderr) = self.stderr.await.map(|v| v.ok()).ok().flatten() {
-                anyhow::bail!("proxy failed: {}\n{}", status, stderr)
-            } else {
-                anyhow::bail!("proxy failed: {} (failed to fetch stderr)", status)
-            }
+        let output = self.childwait.await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("proxy failed: {}\n{}", output.status, stderr)
         }
         Ok(())
     }
