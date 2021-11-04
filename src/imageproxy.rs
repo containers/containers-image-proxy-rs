@@ -217,7 +217,7 @@ impl ImageProxy {
     }
 
     async fn impl_request<R: serde::de::DeserializeOwned + Send + 'static, T, I>(
-        &self,
+        &mut self,
         method: &str,
         args: T,
     ) -> Result<(R, Option<(File, u32)>)>
@@ -229,7 +229,7 @@ impl ImageProxy {
         Self::impl_request_raw(Arc::clone(&self.sockfd), req).await
     }
 
-    async fn finish_pipe(&self, pipeid: u32) -> Result<()> {
+    async fn finish_pipe(&mut self, pipeid: u32) -> Result<()> {
         let (r, fd) = self.impl_request("FinishPipe", [pipeid]).await?;
         if fd.is_some() {
             return Err(anyhow!("Unexpected fd in finish_pipe reply"));
@@ -237,21 +237,21 @@ impl ImageProxy {
         Ok(r)
     }
 
-    pub async fn open_image(&self, imgref: &str) -> Result<OpenedImage> {
+    pub async fn open_image(&mut self, imgref: &str) -> Result<OpenedImage> {
         let (imgid, _) = self
             .impl_request::<u32, _, _>("OpenImage", [imgref])
             .await?;
         Ok(OpenedImage(imgid))
     }
 
-    pub async fn close_image(&self, img: &OpenedImage) -> Result<()> {
+    pub async fn close_image(&mut self, img: &OpenedImage) -> Result<()> {
         let (r, _) = self.impl_request("CloseImage", [img.0]).await?;
         Ok(r)
     }
 
     /// Fetch the manifest.
     /// https://github.com/opencontainers/image-spec/blob/main/manifest.md
-    pub async fn fetch_manifest(&self, img: &OpenedImage) -> Result<(String, Vec<u8>)> {
+    pub async fn fetch_manifest(&mut self, img: &OpenedImage) -> Result<(String, Vec<u8>)> {
         let (digest, fd) = self.impl_request("GetManifest", [img.0]).await?;
         let (fd, pipeid) = fd.ok_or_else(|| anyhow!("Missing fd from reply"))?;
         let mut fd = tokio::io::BufReader::new(tokio::fs::File::from_std(fd));
@@ -268,7 +268,7 @@ impl ImageProxy {
     /// Note that right now the proxy does verification of the digest:
     /// https://github.com/cgwalters/container-image-proxy/issues/1#issuecomment-926712009
     pub async fn get_blob(
-        &self,
+        &mut self,
         img: &OpenedImage,
         digest: &str,
         size: u64,
