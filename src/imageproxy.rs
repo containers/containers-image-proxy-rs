@@ -113,8 +113,12 @@ impl ImageProxy {
     #[instrument]
     pub async fn new() -> Result<Self> {
         let (mysock, theirsock) = new_seqpacket_pair()?;
-        let mut c = std::process::Command::new("skopeo");
-        c.args(&["experimental-image-proxy"]);
+        // By default, we use util-linux's `setpriv` to set up pdeathsig to "lifecycle bind"
+        // the child process to us.  In the future we should allow easily configuring
+        // e.g. systemd-run as a wrapper, etc.
+        let mut c = std::process::Command::new("setpriv");
+        c.args(&["--pdeathsig", "SIGTERM", "--"]);
+        c.args(&["skopeo", "experimental-image-proxy"]);
         c.stdout(Stdio::null()).stderr(Stdio::piped());
         c.stdin(Stdio::from(theirsock));
         let mut c = tokio::process::Command::from(c);
