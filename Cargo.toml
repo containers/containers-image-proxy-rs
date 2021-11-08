@@ -19,9 +19,6 @@ semver = "1.0.4"
 tokio = { features = ["full"], version = "1" }
 tracing = "0.1"
 
-[package.metadata.docs.rs]
-features = ["dox"]
-
 [lib]
 path = "src/imageproxy.rs"
 
