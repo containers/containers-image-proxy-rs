@@ -5,7 +5,7 @@ on:
   pull_request:
   push:
     branches:
-    - main
+      - main
 
 env:
   CARGO_INCREMENTAL: 0
@@ -17,7 +17,8 @@ env:
 jobs:
   rust:
     name: Rust
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    container: quay.io/coreos-assembler/fcos-buildroot:testing-devel
 
     strategy:
       fail-fast: false
@@ -25,28 +26,38 @@ jobs:
         os: [ubuntu-latest]
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v2
-      with:
-        ref: ${{ github.event.pull_request.head.sha }}
-        fetch-depth: 20
+      - name: Checkout repository
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 20
 
-    - name: Install Rust toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        profile: minimal
-        override: true
-        components: rustfmt, rust-src
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+          components: rustfmt, rust-src
 
-    - name: rustfmt
-      run: cargo fmt --all -- --check
+      - name: rustfmt
+        run: cargo fmt --all -- --check
 
-    - name: Cache Dependencies
-      uses: Swatinem/rust-cache@ce325b60658c1b38465c06cc965b79baf32c1e72
+      - name: Cache Dependencies
+        uses: Swatinem/rust-cache@ce325b60658c1b38465c06cc965b79baf32c1e72
 
-    - name: Compile
-      run: cargo test --no-run
+      - name: Compile
+        run: cargo test --no-run
 
-    - name: Test
-      run: cargo test -- --nocapture --quiet
+      - name: Test
+        run: cargo test -- --nocapture --quiet
+
+      - name: Checkout ostree-rs-ext
+        uses: actions/checkout@v2
+        with:
+          repository: ostreedev/ostree-rs-ext
+          path: ostree-rs-ext
+          fetch-depth: 20
+
+      - name: Test ostree-rs-ext
+        run: ./ci/test-ostree-rs-ext.sh

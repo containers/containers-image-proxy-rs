@@ -24,4 +24,3 @@ features = ["dox"]
 
 [lib]
 path = "src/imageproxy.rs"
-
