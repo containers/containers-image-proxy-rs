@@ -108,17 +108,32 @@ fn file_from_scm_rights(cmsg: ControlMessageOwned) -> Option<File> {
     }
 }
 
+/// Configuration for the proxy.
+#[derive(Debug, Default)]
+pub struct ImageProxyConfig {
+    /// Path to container auth file; equivalent to `skopeo --authfile`.
+    pub authfile: Option<String>,
+}
+
 impl ImageProxy {
-    /// Create an image proxy that fetches the target image.
-    #[instrument]
+    /// Create an image proxy that fetches the target image, using default configuration.
     pub async fn new() -> Result<Self> {
+        Self::new_with_config(Default::default()).await
+    }
+
+    /// Create an image proxy that fetches the target image
+    #[instrument]
+    pub async fn new_with_config(config: ImageProxyConfig) -> Result<Self> {
         let (mysock, theirsock) = new_seqpacket_pair()?;
         // By default, we use util-linux's `setpriv` to set up pdeathsig to "lifecycle bind"
         // the child process to us.  In the future we should allow easily configuring
         // e.g. systemd-run as a wrapper, etc.
         let mut c = std::process::Command::new("setpriv");
-        c.args(&["--pdeathsig", "SIGTERM", "--"]);
-        c.args(&["skopeo", "experimental-image-proxy"]);
+        c.args(&["--pdeathsig", "SIGTERM", "--", "skopeo"]);
+        if let Some(authfile) = config.authfile.as_deref() {
+            c.args(&["--authfile", authfile]);
+        }
+        c.arg("experimental-image-proxy");
         c.stdout(Stdio::null()).stderr(Stdio::piped());
         c.stdin(Stdio::from(theirsock));
         let mut c = tokio::process::Command::from(c);
