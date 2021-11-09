@@ -250,7 +250,7 @@ impl ImageProxy {
     }
 
     /// Fetch the manifest.
-    /// https://github.com/opencontainers/image-spec/blob/main/manifest.md
+    /// For more information on OCI manifests, see <https://github.com/opencontainers/image-spec/blob/main/manifest.md>
     pub async fn fetch_manifest(&mut self, img: &OpenedImage) -> Result<(String, Vec<u8>)> {
         let (digest, fd) = self.impl_request("GetManifest", [img.0]).await?;
         let (fd, pipeid) = fd.ok_or_else(|| anyhow!("Missing fd from reply"))?;
@@ -264,9 +264,9 @@ impl ImageProxy {
     }
 
     /// Fetch a blob identified by e.g. `sha256:<digest>`.
-    /// https://github.com/opencontainers/image-spec/blob/main/descriptor.md
-    /// Note that right now the proxy does verification of the digest:
-    /// https://github.com/cgwalters/container-image-proxy/issues/1#issuecomment-926712009
+    /// <https://github.com/opencontainers/image-spec/blob/main/descriptor.md>
+    ///
+    /// The requested size and digest are verified (by the proxy process).
     #[instrument]
     pub async fn get_blob(
         &mut self,
@@ -277,6 +277,8 @@ impl ImageProxy {
         impl AsyncBufRead + Send + Unpin,
         impl Future<Output = Result<()>> + Unpin + '_,
     )> {
+        // For previous discussion on digest/size verification, see
+        // https://github.com/cgwalters/container-image-proxy/issues/1#issuecomment-926712009
         tracing::debug!("fetching blob");
         let args: Vec<serde_json::Value> =
             vec![img.0.into(), digest.to_string().into(), size.into()];
