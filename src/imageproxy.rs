@@ -114,6 +114,8 @@ fn file_from_scm_rights(cmsg: ControlMessageOwned) -> Option<File> {
 pub struct ImageProxyConfig {
     /// Path to container auth file; equivalent to `skopeo --authfile`.
     pub authfile: Option<String>,
+    /// If set, disable TLS verification.  Equivalent to `skopeo --tls-verify=false`.
+    pub insecure_skip_tls_verification: Option<bool>,
 }
 
 impl ImageProxy {
@@ -131,10 +133,13 @@ impl ImageProxy {
         // e.g. systemd-run as a wrapper, etc.
         let mut c = std::process::Command::new("setpriv");
         c.args(&["--pdeathsig", "SIGTERM", "--", "skopeo"]);
+        c.arg("experimental-image-proxy");
         if let Some(authfile) = config.authfile.as_deref() {
             c.args(&["--authfile", authfile]);
         }
-        c.arg("experimental-image-proxy");
+        if config.insecure_skip_tls_verification.unwrap_or_default() {
+            c.arg("--tls-verify=false");
+        }
         c.stdout(Stdio::null()).stderr(Stdio::piped());
         c.stdin(Stdio::from(theirsock));
         let mut c = tokio::process::Command::from(c);
