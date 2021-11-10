@@ -13,7 +13,7 @@ use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::{FromRawFd, RawFd};
 use std::pin::Pin;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufRead, AsyncReadExt};
 use tokio::sync::Mutex as AsyncMutex;
@@ -119,6 +119,27 @@ pub struct ImageProxyConfig {
     pub authfile: Option<String>,
     /// If set, disable TLS verification.  Equivalent to `skopeo --tls-verify=false`.
     pub insecure_skip_tls_verification: Option<bool>,
+    /// Provide a configured [`std::process::Command`] instance.
+    ///
+    /// This allows configuring aspects of the resulting child `skopeo` process.
+    /// The intention of this hook is to allow the caller to use e.g.
+    /// `systemd-run` or equivalent containerization tools.  For example you
+    /// can set up a command whose arguments are `systemd-run -Pq -p DynamicUser=yes -- skopeo`.
+    /// You can also set up arbitrary aspects of the child via e.g.
+    /// [`current_dir`] [`pre_exec`].
+    ///
+    /// [`current_dir`]: https://doc.rust-lang.org/std/process/struct.Command.html#method.current_dir
+    /// [`pre_exec`]: https://doc.rust-lang.org/std/os/unix/process/trait.CommandExt.html#tymethod.pre_exec
+    ///
+    /// The default is to wrap via util-linux `setpriv --pdeathsig SIGTERM -- skopeo`,
+    /// which on Linux binds the lifecycle of the child process to the parent.
+    ///
+    /// Note that you *must* add `skopeo` as the primary argument or
+    /// indirectly.  However, all other command line options including
+    /// `experimental-image-proxy` will be injected by this library.
+    /// You may use a different command name from `skopeo` if your
+    /// application has set up a compatible copy, e.g. `/usr/lib/myapp/my-private-skopeo`/
+    pub skopeo_cmd: Option<Command>,
 }
 
 impl ImageProxy {
@@ -132,10 +153,13 @@ impl ImageProxy {
     pub async fn new_with_config(config: ImageProxyConfig) -> Result<Self> {
         let (mysock, theirsock) = new_seqpacket_pair()?;
         // By default, we use util-linux's `setpriv` to set up pdeathsig to "lifecycle bind"
-        // the child process to us.  In the future we should allow easily configuring
-        // e.g. systemd-run as a wrapper, etc.
-        let mut c = std::process::Command::new("setpriv");
-        c.args(&["--pdeathsig", "SIGTERM", "--", "skopeo"]);
+        // the child process to us.  It looks like there's also
+        // https://crates.io/crates/capctl which we could likely use.
+        let mut c = config.skopeo_cmd.unwrap_or_else(|| {
+            let mut c = std::process::Command::new("setpriv");
+            c.args(&["--pdeathsig", "SIGTERM", "--", "skopeo"]);
+            c
+        });
         c.arg("experimental-image-proxy");
         if let Some(authfile) = config.authfile.as_deref() {
             c.args(&["--authfile", authfile]);
