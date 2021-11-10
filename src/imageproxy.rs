@@ -114,6 +114,8 @@ fn file_from_scm_rights(cmsg: ControlMessageOwned) -> Option<File> {
 pub struct ImageProxyConfig {
     /// Path to container auth file; equivalent to `skopeo --authfile`.
     pub authfile: Option<String>,
+    /// If set, disable TLS verification.  Equivalent to `skopeo --tls-verify=false`.
+    pub insecure_skip_tls_verification: Option<bool>,
 }
 
 impl ImageProxy {
@@ -133,6 +135,9 @@ impl ImageProxy {
         c.args(&["--pdeathsig", "SIGTERM", "--", "skopeo"]);
         if let Some(authfile) = config.authfile.as_deref() {
             c.args(&["--authfile", authfile]);
+        }
+        if config.insecure_skip_tls_verification.unwrap_or_default() {
+            c.arg("--tls-verify=false");
         }
         c.arg("experimental-image-proxy");
         c.stdout(Stdio::null()).stderr(Stdio::piped());
