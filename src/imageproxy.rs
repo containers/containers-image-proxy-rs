@@ -16,6 +16,7 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufRead, AsyncReadExt};
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::instrument;
 
 pub const OCI_TYPE_LAYER_GZIP: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
@@ -71,7 +72,7 @@ type ChildFuture = Pin<Box<dyn Future<Output = std::io::Result<std::process::Out
 /// Manage a child process proxy to fetch container images.
 pub struct ImageProxy {
     sockfd: Arc<Mutex<File>>,
-    childwait: ChildFuture,
+    childwait: Arc<AsyncMutex<ChildFuture>>,
 }
 
 impl std::fmt::Debug for ImageProxy {
@@ -144,7 +145,10 @@ impl ImageProxy {
 
         let sockfd = Arc::new(Mutex::new(mysock));
 
-        let mut r = Self { sockfd, childwait };
+        let r = Self {
+            sockfd,
+            childwait: Arc::new(AsyncMutex::new(childwait)),
+        };
 
         // Verify semantic version
         let protover = r.impl_request::<String, _, ()>("Initialize", []).await?.0;
@@ -217,7 +221,7 @@ impl ImageProxy {
 
     #[instrument(skip(args))]
     async fn impl_request<R: serde::de::DeserializeOwned + Send + 'static, T, I>(
-        &mut self,
+        &self,
         method: &str,
         args: T,
     ) -> Result<(R, Option<(File, u32)>)>
@@ -226,11 +230,12 @@ impl ImageProxy {
         I: Into<serde_json::Value>,
     {
         let req = Self::impl_request_raw(Arc::clone(&self.sockfd), Request::new(method, args));
+        let mut childwait = self.childwait.lock().await;
         tokio::select! {
             r = req => {
                 Ok(r?)
             }
-            r = &mut self.childwait => {
+            r = childwait.as_mut() => {
                 let r = r?;
                 let stderr = String::from_utf8_lossy(&r.stderr);
                 return Err(anyhow::anyhow!("proxy unexpectedly exited during request method {}: {}\n{}", method, r.status, stderr))
@@ -239,7 +244,7 @@ impl ImageProxy {
     }
 
     #[instrument]
-    async fn finish_pipe(&mut self, pipeid: u32) -> Result<()> {
+    async fn finish_pipe(&self, pipeid: u32) -> Result<()> {
         tracing::debug!("closing pipe");
         let (r, fd) = self.impl_request("FinishPipe", [pipeid]).await?;
         if fd.is_some() {
@@ -249,7 +254,7 @@ impl ImageProxy {
     }
 
     #[instrument]
-    pub async fn open_image(&mut self, imgref: &str) -> Result<OpenedImage> {
+    pub async fn open_image(&self, imgref: &str) -> Result<OpenedImage> {
         tracing::debug!("opening image");
         let (imgid, _) = self
             .impl_request::<u32, _, _>("OpenImage", [imgref])
@@ -258,7 +263,7 @@ impl ImageProxy {
     }
 
     #[instrument]
-    pub async fn close_image(&mut self, img: &OpenedImage) -> Result<()> {
+    pub async fn close_image(&self, img: &OpenedImage) -> Result<()> {
         tracing::debug!("closing image");
         let (r, _) = self.impl_request("CloseImage", [img.0]).await?;
         Ok(r)
@@ -266,7 +271,7 @@ impl ImageProxy {
 
     /// Fetch the manifest.
     /// For more information on OCI manifests, see <https://github.com/opencontainers/image-spec/blob/main/manifest.md>
-    pub async fn fetch_manifest(&mut self, img: &OpenedImage) -> Result<(String, Vec<u8>)> {
+    pub async fn fetch_manifest(&self, img: &OpenedImage) -> Result<(String, Vec<u8>)> {
         let (digest, fd) = self.impl_request("GetManifest", [img.0]).await?;
         let (fd, pipeid) = fd.ok_or_else(|| anyhow!("Missing fd from reply"))?;
         let mut fd = tokio::io::BufReader::new(tokio::fs::File::from_std(fd));
@@ -284,7 +289,7 @@ impl ImageProxy {
     /// The requested size and digest are verified (by the proxy process).
     #[instrument]
     pub async fn get_blob(
-        &mut self,
+        &self,
         img: &OpenedImage,
         digest: &str,
         size: u64,
@@ -314,7 +319,8 @@ impl ImageProxy {
         nixsocket::send(sockfd.as_raw_fd(), &sendbuf, nixsocket::MsgFlags::empty())?;
         drop(sendbuf);
         tracing::debug!("sent shutdown request");
-        let output = self.childwait.await?;
+        let mut childwait = self.childwait.lock().await;
+        let output = childwait.as_mut().await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("proxy failed: {}\n{}", output.status, stderr)
