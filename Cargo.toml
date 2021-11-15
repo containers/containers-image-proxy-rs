@@ -5,7 +5,7 @@ license = "MIT OR Apache-2.0"
 name = "containers-image-proxy"
 readme = "README.md"
 repository = "https://github.com/containers/containers-image-proxy-rs"
-version = "0.3.0"
+version = "0.3.1"
 
 [dependencies]
 anyhow = "1.0"
