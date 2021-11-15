@@ -17,6 +17,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufRead, AsyncReadExt};
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::task::JoinError;
 use tracing::instrument;
 
 pub const OCI_TYPE_LAYER_GZIP: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
@@ -67,7 +68,9 @@ struct Reply {
     value: serde_json::Value,
 }
 
-type ChildFuture = Pin<Box<dyn Future<Output = std::io::Result<std::process::Output>>>>;
+type ChildFuture = Pin<
+    Box<dyn Future<Output = std::result::Result<std::io::Result<std::process::Output>, JoinError>>>,
+>;
 
 /// Manage a child process proxy to fetch container images.
 pub struct ImageProxy {
@@ -142,17 +145,18 @@ impl ImageProxy {
         }
         c.stdout(Stdio::null()).stderr(Stdio::piped());
         c.stdin(Stdio::from(theirsock));
-        let mut c = tokio::process::Command::from(c);
-        c.kill_on_drop(true);
         let child = c.spawn().context("Failed to spawn skopeo")?;
         tracing::debug!("Spawned skopeo pid={:?}", child.id());
-        let childwait = Box::pin(child.wait_with_output());
-
+        // Here we use std sync API via thread because tokio installs
+        // a SIGCHLD handler which can conflict with e.g. the glib one
+        // which may also be in process.
+        // xref https://github.com/tokio-rs/tokio/issues/3520#issuecomment-968985861
+        let childwait = tokio::task::spawn_blocking(move || child.wait_with_output());
         let sockfd = Arc::new(Mutex::new(mysock));
 
         let r = Self {
             sockfd,
-            childwait: Arc::new(AsyncMutex::new(childwait)),
+            childwait: Arc::new(AsyncMutex::new(Box::pin(childwait))),
         };
 
         // Verify semantic version
@@ -241,7 +245,7 @@ impl ImageProxy {
                 Ok(r?)
             }
             r = childwait.as_mut() => {
-                let r = r?;
+                let r = r??;
                 let stderr = String::from_utf8_lossy(&r.stderr);
                 return Err(anyhow::anyhow!("proxy unexpectedly exited during request method {}: {}\n{}", method, r.status, stderr))
             }
@@ -325,7 +329,7 @@ impl ImageProxy {
         drop(sendbuf);
         tracing::debug!("sent shutdown request");
         let mut childwait = self.childwait.lock().await;
-        let output = childwait.as_mut().await?;
+        let output = childwait.as_mut().await??;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("proxy failed: {}\n{}", output.status, stderr)
