@@ -11,7 +11,7 @@ use nix::sys::uio::IoVec;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
-use std::os::unix::prelude::{FromRawFd, RawFd};
+use std::os::unix::prelude::{CommandExt, FromRawFd, RawFd};
 use std::pin::Pin;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -152,12 +152,15 @@ impl ImageProxy {
     #[instrument]
     pub async fn new_with_config(config: ImageProxyConfig) -> Result<Self> {
         let (mysock, theirsock) = new_seqpacket_pair()?;
-        // By default, we use util-linux's `setpriv` to set up pdeathsig to "lifecycle bind"
-        // the child process to us.  It looks like there's also
-        // https://crates.io/crates/capctl which we could likely use.
+        // By default, we set up pdeathsig to "lifecycle bind" the child process to us.
         let mut c = config.skopeo_cmd.unwrap_or_else(|| {
-            let mut c = std::process::Command::new("setpriv");
-            c.args(&["--pdeathsig", "SIGTERM", "--", "skopeo"]);
+            let mut c = std::process::Command::new("skopeo");
+            unsafe {
+                c.pre_exec(|| {
+                    capctl::prctl::set_pdeathsig(Some(libc::SIGTERM))
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                });
+            }
             c
         });
         c.arg("experimental-image-proxy");

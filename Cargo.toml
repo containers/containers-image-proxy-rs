@@ -9,10 +9,12 @@ version = "0.3.1"
 
 [dependencies]
 anyhow = "1.0"
+capctl = "0.2.0"
 fn-error-context = "0.2.0"
 futures-util = "0.3.13"
 lazy_static = "1.4.0"
 nix = "0.22.0"
+libc = "0.2"
 serde = { features = ["derive"], version = "1.0.125" }
 serde_json = "1.0.64"
 semver = "1.0.4"
