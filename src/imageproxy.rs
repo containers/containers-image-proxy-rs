@@ -117,8 +117,15 @@ fn file_from_scm_rights(cmsg: ControlMessageOwned) -> Option<File> {
 pub struct ImageProxyConfig {
     /// Path to container auth file; equivalent to `skopeo --authfile`.
     pub authfile: Option<String>,
+
+    /// Do not use default container authentication paths; equivalent to `skopeo --no-creds`.
+    ///
+    /// Defaults to `false`; in other words, use the default file paths from `man containers-auth.json`.
+    pub auth_anonymous: bool,
+
     /// If set, disable TLS verification.  Equivalent to `skopeo --tls-verify=false`.
     pub insecure_skip_tls_verification: Option<bool>,
+
     /// Provide a configured [`std::process::Command`] instance.
     ///
     /// This allows configuring aspects of the resulting child `skopeo` process.
@@ -166,6 +173,12 @@ impl ImageProxy {
         c.arg("experimental-image-proxy");
         if let Some(authfile) = config.authfile.as_deref() {
             c.args(&["--authfile", authfile]);
+            if config.auth_anonymous {
+                // This is a programmer error really
+                anyhow::bail!("Cannot use anonymous auth and an authfile");
+            }
+        } else if config.auth_anonymous {
+            c.arg("--no-creds");
         }
         if config.insecure_skip_tls_verification.unwrap_or_default() {
             c.arg("--tls-verify=false");
