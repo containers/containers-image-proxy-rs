@@ -9,6 +9,7 @@ use futures_util::Future;
 use nix::sys::socket::{self as nixsocket, ControlMessageOwned};
 use nix::sys::uio::IoVec;
 use serde::{Deserialize, Serialize};
+use std::convert::TryFrom;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::{CommandExt, FromRawFd, RawFd};
@@ -149,16 +150,10 @@ pub struct ImageProxyConfig {
     pub skopeo_cmd: Option<Command>,
 }
 
-impl ImageProxy {
-    /// Create an image proxy that fetches the target image, using default configuration.
-    pub async fn new() -> Result<Self> {
-        Self::new_with_config(Default::default()).await
-    }
+impl TryFrom<ImageProxyConfig> for Command {
+    type Error = anyhow::Error;
 
-    /// Create an image proxy that fetches the target image
-    #[instrument]
-    pub async fn new_with_config(config: ImageProxyConfig) -> Result<Self> {
-        let (mysock, theirsock) = new_seqpacket_pair()?;
+    fn try_from(config: ImageProxyConfig) -> Result<Self, Self::Error> {
         // By default, we set up pdeathsig to "lifecycle bind" the child process to us.
         let mut c = config.skopeo_cmd.unwrap_or_else(|| {
             let mut c = std::process::Command::new("skopeo");
@@ -184,6 +179,21 @@ impl ImageProxy {
             c.arg("--tls-verify=false");
         }
         c.stdout(Stdio::null()).stderr(Stdio::piped());
+        Ok(c)
+    }
+}
+
+impl ImageProxy {
+    /// Create an image proxy that fetches the target image, using default configuration.
+    pub async fn new() -> Result<Self> {
+        Self::new_with_config(Default::default()).await
+    }
+
+    /// Create an image proxy that fetches the target image
+    #[instrument]
+    pub async fn new_with_config(config: ImageProxyConfig) -> Result<Self> {
+        let mut c = Command::try_from(config)?;
+        let (mysock, theirsock) = new_seqpacket_pair()?;
         c.stdin(Stdio::from(theirsock));
         let child = c.spawn().context("Failed to spawn skopeo")?;
         tracing::debug!("Spawned skopeo pid={:?}", child.id());
@@ -376,5 +386,47 @@ impl ImageProxy {
         }
         tracing::debug!("proxy exited successfully");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validate(c: Command, contains: &[&str], not_contains: &[&str]) {
+        // Format via debug, because
+        // https://doc.rust-lang.org/std/process/struct.Command.html#method.get_args
+        // is experimental
+        let d = format!("{:?}", c);
+        for c in contains {
+            assert!(d.contains(c), "{} missing {}", d, c);
+        }
+        for c in not_contains {
+            assert!(!d.contains(c), "{} should not contain {}", d, c);
+        }
+    }
+
+    #[test]
+    fn proxy_configs() {
+        let c = Command::try_from(ImageProxyConfig::default()).unwrap();
+        validate(
+            c,
+            &["experimental-image-proxy"],
+            &["--no-creds", "--tls-verify", "--authfile"],
+        );
+
+        let c = Command::try_from(ImageProxyConfig {
+            authfile: Some("/path/to/authfile".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        validate(c, &[r"--authfile", "/path/to/authfile"], &[]);
+
+        let c = Command::try_from(ImageProxyConfig {
+            insecure_skip_tls_verification: Some(true),
+            ..Default::default()
+        })
+        .unwrap();
+        validate(c, &[r"--tls-verify=false"], &[]);
     }
 }
