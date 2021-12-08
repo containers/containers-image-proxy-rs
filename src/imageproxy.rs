@@ -13,6 +13,7 @@ use std::convert::TryFrom;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::{CommandExt, FromRawFd, RawFd};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -117,12 +118,16 @@ fn file_from_scm_rights(cmsg: ControlMessageOwned) -> Option<File> {
 #[derive(Debug, Default)]
 pub struct ImageProxyConfig {
     /// Path to container auth file; equivalent to `skopeo --authfile`.
-    pub authfile: Option<String>,
+    pub authfile: Option<PathBuf>,
 
     /// Do not use default container authentication paths; equivalent to `skopeo --no-creds`.
     ///
     /// Defaults to `false`; in other words, use the default file paths from `man containers-auth.json`.
     pub auth_anonymous: bool,
+
+    // Directory with certificates (*.crt, *.cert, *.key) used to connect to registry
+    // Equivalent to `skopeo --cert-dir`
+    pub certificate_directory: Option<PathBuf>,
 
     /// If set, disable TLS verification.  Equivalent to `skopeo --tls-verify=false`.
     pub insecure_skip_tls_verification: Option<bool>,
@@ -166,14 +171,19 @@ impl TryFrom<ImageProxyConfig> for Command {
             c
         });
         c.arg("experimental-image-proxy");
-        if let Some(authfile) = config.authfile.as_deref() {
-            c.args(&["--authfile", authfile]);
+        if let Some(authfile) = config.authfile {
             if config.auth_anonymous {
                 // This is a programmer error really
                 anyhow::bail!("Cannot use anonymous auth and an authfile");
             }
+            c.arg("--authfile");
+            c.arg(authfile);
         } else if config.auth_anonymous {
             c.arg("--no-creds");
+        }
+        if let Some(certificate_directory) = config.certificate_directory {
+            c.arg("--cert-dir");
+            c.arg(certificate_directory);
         }
         if config.insecure_skip_tls_verification.unwrap_or_default() {
             c.arg("--tls-verify=false");
@@ -416,11 +426,18 @@ mod tests {
         );
 
         let c = Command::try_from(ImageProxyConfig {
-            authfile: Some("/path/to/authfile".to_string()),
+            authfile: Some(PathBuf::from("/path/to/authfile")),
             ..Default::default()
         })
         .unwrap();
         validate(c, &[r"--authfile", "/path/to/authfile"], &[]);
+
+        let c = Command::try_from(ImageProxyConfig {
+            certificate_directory: Some(PathBuf::from("/path/to/certs")),
+            ..Default::default()
+        })
+        .unwrap();
+        validate(c, &[r"--cert-dir", "/path/to/certs"], &[]);
 
         let c = Command::try_from(ImageProxyConfig {
             insecure_skip_tls_verification: Some(true),
