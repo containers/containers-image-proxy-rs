@@ -32,6 +32,10 @@ lazy_static::lazy_static! {
     static ref SUPPORTED_PROTO_VERSION: semver::VersionReq = {
         semver::VersionReq::parse("0.2.0").unwrap()
     };
+    // https://github.com/containers/skopeo/pull/1523
+    static ref SEMVER_0_2_3: semver::VersionReq = {
+        semver::VersionReq::parse("0.2.3").unwrap()
+    };
 }
 
 #[derive(Serialize)]
@@ -77,6 +81,7 @@ type ChildFuture = Pin<
 pub struct ImageProxy {
     sockfd: Arc<Mutex<File>>,
     childwait: Arc<AsyncMutex<ChildFuture>>,
+    protover: semver::Version,
 }
 
 impl std::fmt::Debug for ImageProxy {
@@ -204,9 +209,10 @@ impl ImageProxy {
         let childwait = tokio::task::spawn_blocking(move || child.wait_with_output());
         let sockfd = Arc::new(Mutex::new(mysock));
 
-        let r = Self {
+        let mut r = Self {
             sockfd,
             childwait: Arc::new(AsyncMutex::new(Box::pin(childwait))),
+            protover: semver::Version::new(0, 0, 0),
         };
 
         // Verify semantic version
@@ -220,8 +226,18 @@ impl ImageProxy {
                 supported
             ));
         }
+        r.protover = protover;
 
         Ok(r)
+    }
+
+    /// If the proxy supports at least semver 0.2.3, return a wrapper with methods from that version.
+    pub fn get_0_2_3(&self) -> Option<ImageProxy0_2_3<'_>> {
+        if SEMVER_0_2_3.matches(&self.protover) {
+            Some(ImageProxy0_2_3 { proxy: self })
+        } else {
+            None
+        }
     }
 
     async fn impl_request_raw<T: serde::de::DeserializeOwned + Send + 'static>(
@@ -328,18 +344,22 @@ impl ImageProxy {
         Ok(r)
     }
 
+    async fn read_all_fd(&self, fd: Option<(File, u32)>) -> Result<Vec<u8>> {
+        let (fd, pipeid) = fd.ok_or_else(|| anyhow!("Missing fd from reply"))?;
+        let mut fd = tokio::io::BufReader::new(tokio::fs::File::from_std(fd));
+        let mut r = Vec::new();
+        let reader = fd.read_to_end(&mut r);
+        let (nbytes, finish) = tokio::join!(reader, self.finish_pipe(pipeid));
+        finish?;
+        assert_eq!(nbytes?, r.len());
+        Ok(r)
+    }
+
     /// Fetch the manifest.
     /// For more information on OCI manifests, see <https://github.com/opencontainers/image-spec/blob/main/manifest.md>
     pub async fn fetch_manifest(&self, img: &OpenedImage) -> Result<(String, Vec<u8>)> {
         let (digest, fd) = self.impl_request("GetManifest", [img.0]).await?;
-        let (fd, pipeid) = fd.ok_or_else(|| anyhow!("Missing fd from reply"))?;
-        let mut fd = tokio::io::BufReader::new(tokio::fs::File::from_std(fd));
-        let mut manifest = Vec::new();
-        let reader = fd.read_to_end(&mut manifest);
-        let (reader, finish) = tokio::join!(reader, self.finish_pipe(pipeid));
-        reader?;
-        finish?;
-        Ok((digest, manifest))
+        Ok((digest, self.read_all_fd(fd).await?))
     }
 
     /// Fetch a blob identified by e.g. `sha256:<digest>`.
@@ -386,6 +406,23 @@ impl ImageProxy {
         }
         tracing::debug!("proxy exited successfully");
         Ok(())
+    }
+}
+
+/// A proxy which implements methods from 0.2.3 or newer.
+pub struct ImageProxy0_2_3<'a> {
+    proxy: &'a ImageProxy,
+}
+
+impl<'a> ImageProxy0_2_3<'a> {
+    /// Fetch the config.
+    /// For more information on OCI config, see <https://github.com/opencontainers/image-spec/blob/main/config.md>
+    pub async fn fetch_config(&self, img: &OpenedImage) -> Result<Vec<u8>> {
+        let (_, fd) = self
+            .proxy
+            .impl_request::<(), _, _>("GetFullConfig", [img.0])
+            .await?;
+        self.proxy.read_all_fd(fd).await
     }
 }
 
