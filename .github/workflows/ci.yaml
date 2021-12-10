@@ -51,8 +51,7 @@ jobs:
       - name: Checkout ostree-rs-ext
         uses: actions/checkout@v2
         with:
-          repository: mkenigs/ostree-rs-ext
-          ref: cert_dir
+          repository: ostreedev/ostree-rs-ext
           path: ostree-rs-ext
           fetch-depth: 20
       - name: Test ostree-rs-ext
