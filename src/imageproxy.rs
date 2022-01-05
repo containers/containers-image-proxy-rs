@@ -30,7 +30,7 @@ pub const OCI_TYPE_LAYER_TAR: &str = "application/vnd.oci.image.layer.v1.tar";
 const MAX_MSG_SIZE: usize = 32 * 1024;
 
 lazy_static::lazy_static! {
-    static ref SUPPORTED_PROTO_VERSION: semver::VersionReq = {
+    static ref BASE_PROTO_VERSION: semver::VersionReq = {
         semver::VersionReq::parse("0.2.0").unwrap()
     };
     // https://github.com/containers/skopeo/pull/1523
@@ -228,7 +228,11 @@ impl ImageProxy {
         // Verify semantic version
         let protover = r.impl_request::<String, _, ()>("Initialize", []).await?.0;
         let protover = semver::Version::parse(protover.as_str())?;
-        let supported = &*SUPPORTED_PROTO_VERSION;
+        let supported = if cfg!(feature = "proxy_v0_2_3") {
+            &*SEMVER_0_2_3
+        } else {
+            &*BASE_PROTO_VERSION
+        };
         if !supported.matches(&protover) {
             return Err(anyhow!(
                 "Unsupported protocol version {} (compatible: {})",
@@ -239,15 +243,6 @@ impl ImageProxy {
         r.protover = protover;
 
         Ok(r)
-    }
-
-    /// If the proxy supports at least semver 0.2.3, return a wrapper with methods from that version.
-    pub fn get_0_2_3(&self) -> Option<ImageProxy0_2_3<'_>> {
-        if SEMVER_0_2_3.matches(&self.protover) {
-            Some(ImageProxy0_2_3 { proxy: self })
-        } else {
-            None
-        }
     }
 
     async fn impl_request_raw<T: serde::de::DeserializeOwned + Send + 'static>(
@@ -372,6 +367,16 @@ impl ImageProxy {
         Ok((digest, self.read_all_fd(fd).await?))
     }
 
+    /// Fetch the config.
+    /// For more information on OCI config, see <https://github.com/opencontainers/image-spec/blob/main/config.md>
+    #[cfg(feature = "proxy_v0_2_3")]
+    pub async fn fetch_config(&self, img: &OpenedImage) -> Result<Vec<u8>> {
+        let (_, fd) = self
+            .impl_request::<(), _, _>("GetFullConfig", [img.0])
+            .await?;
+        self.read_all_fd(fd).await
+    }
+
     /// Fetch a blob identified by e.g. `sha256:<digest>`.
     /// <https://github.com/opencontainers/image-spec/blob/main/descriptor.md>
     ///
@@ -416,23 +421,6 @@ impl ImageProxy {
         }
         tracing::debug!("proxy exited successfully");
         Ok(())
-    }
-}
-
-/// A proxy which implements methods from 0.2.3 or newer.
-pub struct ImageProxy0_2_3<'a> {
-    proxy: &'a ImageProxy,
-}
-
-impl<'a> ImageProxy0_2_3<'a> {
-    /// Fetch the config.
-    /// For more information on OCI config, see <https://github.com/opencontainers/image-spec/blob/main/config.md>
-    pub async fn fetch_config(&self, img: &OpenedImage) -> Result<Vec<u8>> {
-        let (_, fd) = self
-            .proxy
-            .impl_request::<(), _, _>("GetFullConfig", [img.0])
-            .await?;
-        self.proxy.read_all_fd(fd).await
     }
 }
 

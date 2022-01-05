@@ -23,3 +23,6 @@ tracing = "0.1"
 
 [lib]
 path = "src/imageproxy.rs"
+
+[features]
+proxy_v0_2_3 = []

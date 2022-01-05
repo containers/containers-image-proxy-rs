@@ -44,10 +44,12 @@ jobs:
           override: true
       - name: Cache Dependencies
         uses: Swatinem/rust-cache@ce325b60658c1b38465c06cc965b79baf32c1e72
-      - name: Compile
+      - name: Compile (no features)
         run: cargo test --no-run
+      - name: Compile (all features)
+        run: cargo test --no-run --all-features
       - name: Test
-        run: cargo test -- --nocapture --quiet
+        run: cargo test --all-features -- --nocapture --quiet
       - name: Checkout ostree-rs-ext
         uses: actions/checkout@v2
         with:
