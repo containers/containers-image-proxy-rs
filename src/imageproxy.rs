@@ -8,6 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use futures_util::Future;
 use nix::sys::socket::{self as nixsocket, ControlMessageOwned};
 use nix::sys::uio::IoVec;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
 use std::fs::File;
@@ -29,15 +30,12 @@ pub const OCI_TYPE_LAYER_TAR: &str = "application/vnd.oci.image.layer.v1.tar";
 // Note that payload data (non-metadata) should go over a pipe file descriptor.
 const MAX_MSG_SIZE: usize = 32 * 1024;
 
-lazy_static::lazy_static! {
-    static ref BASE_PROTO_VERSION: semver::VersionReq = {
-        semver::VersionReq::parse("0.2.0").unwrap()
-    };
-    // https://github.com/containers/skopeo/pull/1523
-    static ref SEMVER_0_2_3: semver::VersionReq = {
-        semver::VersionReq::parse("0.2.3").unwrap()
-    };
-}
+static BASE_PROTO_VERSION: Lazy<semver::VersionReq> =
+    Lazy::new(|| semver::VersionReq::parse("0.2.0").unwrap());
+
+// https://github.com/containers/skopeo/pull/1523
+static SEMVER_0_2_3: Lazy<semver::VersionReq> =
+    Lazy::new(|| semver::VersionReq::parse("0.2.3").unwrap());
 
 #[derive(Serialize)]
 struct Request {
