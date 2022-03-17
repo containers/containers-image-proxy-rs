@@ -50,14 +50,15 @@ jobs:
         run: cargo test --no-run --all-features
       - name: Test
         run: cargo test --all-features -- --nocapture --quiet
-      - name: Checkout ostree-rs-ext
-        uses: actions/checkout@v2
-        with:
-          repository: ostreedev/ostree-rs-ext
-          path: ostree-rs-ext
-          fetch-depth: 20
-      - name: Test ostree-rs-ext
-        run: ./ci/test-ostree-rs-ext.sh
+      # TODO: Re-enable this when git master there lands https://github.com/ostreedev/ostree-rs-ext/pull/123
+      # - name: Checkout ostree-rs-ext
+      #   uses: actions/checkout@v2
+      #   with:
+      #     repository: ostreedev/ostree-rs-ext
+      #     path: ostree-rs-ext
+      #     fetch-depth: 20
+      # - name: Test ostree-rs-ext
+      #   run: ./ci/test-ostree-rs-ext.sh
   build-minimum-toolchain:
     name: "Build, minimum supported toolchain (MSRV)"
     runs-on: ubuntu-latest

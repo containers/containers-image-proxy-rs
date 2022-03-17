@@ -30,11 +30,8 @@ pub const OCI_TYPE_LAYER_TAR: &str = "application/vnd.oci.image.layer.v1.tar";
 // Note that payload data (non-metadata) should go over a pipe file descriptor.
 const MAX_MSG_SIZE: usize = 32 * 1024;
 
+// Introduced in https://github.com/containers/skopeo/pull/1523
 static BASE_PROTO_VERSION: Lazy<semver::VersionReq> =
-    Lazy::new(|| semver::VersionReq::parse("0.2.0").unwrap());
-
-// https://github.com/containers/skopeo/pull/1523
-static SEMVER_0_2_3: Lazy<semver::VersionReq> =
     Lazy::new(|| semver::VersionReq::parse("0.2.3").unwrap());
 
 #[derive(Serialize)]
@@ -226,11 +223,8 @@ impl ImageProxy {
         // Verify semantic version
         let protover = r.impl_request::<String, _, ()>("Initialize", []).await?.0;
         let protover = semver::Version::parse(protover.as_str())?;
-        let supported = if cfg!(feature = "proxy_v0_2_3") {
-            &*SEMVER_0_2_3
-        } else {
-            &*BASE_PROTO_VERSION
-        };
+        // Previously we had a feature to opt-in to requiring newer versions using `if cfg!()`.
+        let supported = &*BASE_PROTO_VERSION;
         if !supported.matches(&protover) {
             return Err(anyhow!(
                 "Unsupported protocol version {} (compatible: {})",
@@ -367,7 +361,6 @@ impl ImageProxy {
 
     /// Fetch the config.
     /// For more information on OCI config, see <https://github.com/opencontainers/image-spec/blob/main/config.md>
-    #[cfg(feature = "proxy_v0_2_3")]
     pub async fn fetch_config(&self, img: &OpenedImage) -> Result<Vec<u8>> {
         let (_, fd) = self
             .impl_request::<(), _, _>("GetFullConfig", [img.0])
