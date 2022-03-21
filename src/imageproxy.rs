@@ -352,20 +352,42 @@ impl ImageProxy {
         Ok(r)
     }
 
-    /// Fetch the manifest.
+    /// Fetch the manifest as raw bytes, converted to OCI if necessary.
+    /// The original digest of the unconverted manifest is also returned.
     /// For more information on OCI manifests, see <https://github.com/opencontainers/image-spec/blob/main/manifest.md>
-    pub async fn fetch_manifest(&self, img: &OpenedImage) -> Result<(String, Vec<u8>)> {
+    pub async fn fetch_manifest_raw_oci(&self, img: &OpenedImage) -> Result<(String, Vec<u8>)> {
         let (digest, fd) = self.impl_request("GetManifest", [img.0]).await?;
         Ok((digest, self.read_all_fd(fd).await?))
     }
 
+    /// Fetch the manifest.
+    /// For more information on OCI manifests, see <https://github.com/opencontainers/image-spec/blob/main/manifest.md>
+    pub async fn fetch_manifest(
+        &self,
+        img: &OpenedImage,
+    ) -> Result<(String, oci_spec::image::ImageManifest)> {
+        let (digest, raw) = self.fetch_manifest_raw_oci(img).await?;
+        let manifest = serde_json::from_slice(&raw)?;
+        Ok((digest, manifest))
+    }
+
     /// Fetch the config.
     /// For more information on OCI config, see <https://github.com/opencontainers/image-spec/blob/main/config.md>
-    pub async fn fetch_config(&self, img: &OpenedImage) -> Result<Vec<u8>> {
+    pub async fn fetch_config_raw(&self, img: &OpenedImage) -> Result<Vec<u8>> {
         let (_, fd) = self
             .impl_request::<(), _, _>("GetFullConfig", [img.0])
             .await?;
         self.read_all_fd(fd).await
+    }
+
+    /// Fetch the config.
+    /// For more information on OCI config, see <https://github.com/opencontainers/image-spec/blob/main/config.md>
+    pub async fn fetch_config(
+        &self,
+        img: &OpenedImage,
+    ) -> Result<oci_spec::image::ImageConfiguration> {
+        let raw = self.fetch_config_raw(img).await?;
+        Ok(serde_json::from_slice(&raw)?)
     }
 
     /// Fetch a blob identified by e.g. `sha256:<digest>`.
