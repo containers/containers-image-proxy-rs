@@ -11,9 +11,9 @@ on:
 
 env:
   # Pinned toolchain for linting
-  ACTION_LINTS_TOOLCHAIN: 1.56.0
+  ACTION_LINTS_TOOLCHAIN: 1.58.1
   # Minimum supported Rust version (MSRV)
-  ACTION_MSRV_TOOLCHAIN: 1.54.0
+  ACTION_MSRV_TOOLCHAIN: 1.58.1
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
   CARGO_TERM_COLOR: always
