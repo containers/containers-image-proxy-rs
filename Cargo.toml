@@ -1,6 +1,6 @@
 [package]
 description = "Interact with the github.com/containers/image library via skopeo"
-edition = "2018"
+edition = "2021"
 license = "MIT OR Apache-2.0"
 name = "containers-image-proxy"
 readme = "README.md"

@@ -10,7 +10,6 @@ use nix::sys::socket::{self as nixsocket, ControlMessageOwned};
 use nix::sys::uio::IoVec;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::convert::TryFrom;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::{CommandExt, FromRawFd, RawFd};
@@ -419,6 +418,7 @@ impl ImageProxy {
     /// Close the connection and wait for the child process to exit successfully.
     #[instrument]
     pub async fn finalize(self) -> Result<()> {
+        let _ = &self;
         let req = Request::new_bare("Shutdown");
         let sendbuf = serde_json::to_vec(&req)?;
         // SAFETY: Only panics if a worker thread already panic'd
