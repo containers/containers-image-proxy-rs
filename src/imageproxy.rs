@@ -334,6 +334,20 @@ impl ImageProxy {
     }
 
     #[instrument]
+    #[cfg(feature = "proxy_v0_2_4")]
+    pub async fn open_image_optional(&self, imgref: &str) -> Result<Option<OpenedImage>> {
+        tracing::debug!("opening image");
+        let (imgid, _) = self
+            .impl_request::<u32, _, _>("OpenImageOptional", [imgref])
+            .await?;
+        if imgid == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(OpenedImage(imgid)))
+        }
+    }
+
+    #[instrument]
     pub async fn close_image(&self, img: &OpenedImage) -> Result<()> {
         tracing::debug!("closing image");
         let (r, _) = self.impl_request("CloseImage", [img.0]).await?;
