@@ -32,6 +32,8 @@ const MAX_MSG_SIZE: usize = 32 * 1024;
 // Introduced in https://github.com/containers/skopeo/pull/1523
 static BASE_PROTO_VERSION: Lazy<semver::VersionReq> =
     Lazy::new(|| semver::VersionReq::parse("0.2.3").unwrap());
+static LAYER_INFO_PROTO_VERSION: Lazy<semver::VersionReq> =
+    Lazy::new(|| semver::VersionReq::parse("0.2.5").unwrap());
 
 #[derive(Serialize)]
 struct Request {
@@ -190,6 +192,20 @@ impl TryFrom<ImageProxyConfig> for Command {
         c.stdout(Stdio::null()).stderr(Stdio::piped());
         Ok(c)
     }
+}
+
+/// BlobInfo collects known information about a blob
+#[derive(Debug, serde::Deserialize)]
+pub struct ConvertedLayerInfo {
+    /// Uncompressed digest of a layer; for more information, see
+    /// https://github.com/opencontainers/image-spec/blob/main/config.md#layer-diffid
+    pub digest: String,
+
+    /// Size of blob
+    pub size: i64,
+
+    /// Mediatype of blob
+    pub media_type: oci_spec::image::MediaType,
 }
 
 impl ImageProxy {
@@ -428,6 +444,18 @@ impl ImageProxy {
         let fd = tokio::io::BufReader::new(tokio::fs::File::from_std(fd));
         let finish = Box::pin(self.finish_pipe(pipeid));
         Ok((fd, finish))
+    }
+
+    ///Returns data that can be used to find the "diffid" corresponding to a particular layer.
+    #[instrument]
+    pub async fn get_layer_info(&self, img: &OpenedImage) -> Result<Option<Vec<ConvertedLayerInfo>>> {
+        tracing::debug!("Getting layer info");
+        if !LAYER_INFO_PROTO_VERSION.matches(&self.protover) {
+            return Ok(None);
+        }
+        let reply = self.impl_request("GetLayerInfo", [img.0]).await?;
+        let layers: Vec<ConvertedLayerInfo> = reply.0;
+        Ok(Some(layers))
     }
 
     /// Close the connection and wait for the child process to exit successfully.
