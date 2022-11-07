@@ -304,12 +304,12 @@ impl ImageProxy {
         let mut childwait = self.childwait.lock().await;
         tokio::select! {
             r = req => {
-                Ok(r?)
+                Ok(r.with_context(|| format!("Failed to invoke skopeo proxy method {method}"))?)
             }
             r = childwait.as_mut() => {
                 let r = r??;
                 let stderr = String::from_utf8_lossy(&r.stderr);
-                return Err(anyhow::anyhow!("proxy unexpectedly exited during request method {}: {}\n{}", method, r.status, stderr))
+                return Err(anyhow::anyhow!("skopeo proxy unexpectedly exited during request method {}: {}\n{}", method, r.status, stderr))
             }
         }
     }
@@ -380,7 +380,8 @@ impl ImageProxy {
         img: &OpenedImage,
     ) -> Result<(String, oci_spec::image::ImageManifest)> {
         let (digest, raw) = self.fetch_manifest_raw_oci(img).await?;
-        let manifest = serde_json::from_slice(&raw)?;
+        let manifest =
+            serde_json::from_slice(&raw).context("Deserializing manifest from skopeo")?;
         Ok((digest, manifest))
     }
 
@@ -400,7 +401,7 @@ impl ImageProxy {
         img: &OpenedImage,
     ) -> Result<oci_spec::image::ImageConfiguration> {
         let raw = self.fetch_config_raw(img).await?;
-        Ok(serde_json::from_slice(&raw)?)
+        Ok(serde_json::from_slice(&raw).context("Deserializing config from skopeo")?)
     }
 
     /// Fetch a blob identified by e.g. `sha256:<digest>`.
