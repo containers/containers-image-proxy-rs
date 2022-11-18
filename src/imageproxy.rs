@@ -5,12 +5,15 @@
 //! More information: <https://github.com/containers/skopeo/pull/1476>
 
 use anyhow::{anyhow, Context, Result};
+use cap_std_ext::cap_std;
+use cap_std_ext::prelude::CapStdExtCommandExt;
 use futures_util::Future;
 use nix::sys::socket::{self as nixsocket, ControlMessageOwned};
 use nix::sys::uio::IoVec;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
+use std::ops::Range;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::prelude::{CommandExt, FromRawFd, RawFd};
 use std::path::PathBuf;
@@ -24,6 +27,11 @@ use tracing::instrument;
 
 pub const OCI_TYPE_LAYER_GZIP: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
 pub const OCI_TYPE_LAYER_TAR: &str = "application/vnd.oci.image.layer.v1.tar";
+
+/// File descriptor range which is reserved for passing data down into the proxy;
+/// avoid configuring the command to use files in this range.  (Also, stdin is
+/// reserved)
+pub const RESERVED_FD_RANGE: Range<i32> = 100..200;
 
 // This is defined in skopeo; maximum size of JSON we will read/write.
 // Note that payload data (non-metadata) should go over a pipe file descriptor.
@@ -117,7 +125,11 @@ fn file_from_scm_rights(cmsg: ControlMessageOwned) -> Option<File> {
 #[derive(Debug, Default)]
 pub struct ImageProxyConfig {
     /// Path to container auth file; equivalent to `skopeo --authfile`.
+    /// This conflicts with [`auth_data`].
     pub authfile: Option<PathBuf>,
+
+    /// Data stream for container auth.  This conflicts with [`authfile`].
+    pub auth_data: Option<File>,
 
     /// Do not use default container authentication paths; equivalent to `skopeo --no-creds`.
     ///
@@ -158,6 +170,13 @@ impl TryFrom<ImageProxyConfig> for Command {
     type Error = anyhow::Error;
 
     fn try_from(config: ImageProxyConfig) -> Result<Self, Self::Error> {
+        let mut allocated_fds = RESERVED_FD_RANGE.clone();
+        let mut alloc_fd = || {
+            allocated_fds
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("Ran out of reserved file descriptors for child"))
+        };
+
         // By default, we set up pdeathsig to "lifecycle bind" the child process to us.
         let mut c = config.skopeo_cmd.unwrap_or_else(|| {
             let mut c = std::process::Command::new("skopeo");
@@ -170,16 +189,40 @@ impl TryFrom<ImageProxyConfig> for Command {
             c
         });
         c.arg("experimental-image-proxy");
+        let auth_option_count = [
+            config.authfile.is_some(),
+            config.auth_data.is_some(),
+            config.auth_anonymous,
+        ]
+        .into_iter()
+        .filter(|&x| x)
+        .count();
+        if auth_option_count > 1 {
+            // This is a programmer error really
+            anyhow::bail!("Conflicting authentication options");
+        }
         if let Some(authfile) = config.authfile {
-            if config.auth_anonymous {
-                // This is a programmer error really
-                anyhow::bail!("Cannot use anonymous auth and an authfile");
-            }
             c.arg("--authfile");
             c.arg(authfile);
+        } else if let Some(mut auth_data) = config.auth_data.map(std::io::BufReader::new) {
+            // If we get the authentication data as a file, we always copy it to a new temporary file under
+            // the assumption that the caller provided it this way to aid in privilege separation where
+            // the file is only readable to privileged code.
+            let target_fd = alloc_fd()?;
+            let tmpd = &cap_std::fs::Dir::open_ambient_dir("/tmp", cap_std::ambient_authority())?;
+            let mut tempfile = cap_tempfile::TempFile::new_anonymous(tmpd)
+                .context("Creating temporary file for auth data")
+                .map(std::io::BufWriter::new)?;
+            std::io::copy(&mut auth_data, &mut tempfile)?;
+            let tempfile = tempfile.into_inner()?.into_std();
+            let fd = std::sync::Arc::new(tempfile.into());
+            c.take_fd_n(fd, target_fd);
+            c.arg("--authfile");
+            c.arg(format!("/proc/self/fd/{target_fd}"));
         } else if config.auth_anonymous {
             c.arg("--no-creds");
         }
+
         if let Some(certificate_directory) = config.certificate_directory {
             c.arg("--cert-dir");
             c.arg(certificate_directory);
@@ -454,6 +497,8 @@ impl ImageProxy {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Seek, Write};
+
     use super::*;
 
     fn validate(c: Command, contains: &[&str], not_contains: &[&str]) {
@@ -471,6 +516,8 @@ mod tests {
 
     #[test]
     fn proxy_configs() {
+        let tmpd = &cap_tempfile::tempdir(cap_std::ambient_authority()).unwrap();
+
         let c = Command::try_from(ImageProxyConfig::default()).unwrap();
         validate(
             c,
@@ -498,5 +545,15 @@ mod tests {
         })
         .unwrap();
         validate(c, &[r"--tls-verify=false"], &[]);
+
+        let mut tmpf = cap_tempfile::TempFile::new_anonymous(tmpd).unwrap();
+        tmpf.write_all(r#"{ "auths": {} "#.as_bytes()).unwrap();
+        tmpf.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let c = Command::try_from(ImageProxyConfig {
+            auth_data: Some(tmpf.into_std()),
+            ..Default::default()
+        })
+        .unwrap();
+        validate(c, &["--authfile", "/proc/self/fd/100"], &[]);
     }
 }
