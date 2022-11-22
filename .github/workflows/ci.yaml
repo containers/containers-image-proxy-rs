@@ -12,9 +12,6 @@ on:
 env:
   # Pinned toolchain for linting
   ACTION_LINTS_TOOLCHAIN: 1.58.1
-  # Minimum supported Rust version (MSRV)
-  ACTION_MSRV_TOOLCHAIN: 1.58.1
-  CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
   CARGO_TERM_COLOR: always
   CI: 1
@@ -22,8 +19,8 @@ env:
   RUST_BACKTRACE: short
 
 jobs:
-  rust:
-    name: Rust
+  build-test:
+    name: Build+Test
     runs-on: ubuntu-latest
     container: quay.io/coreos-assembler/fcos-buildroot:testing-devel
     strategy:
@@ -32,51 +29,52 @@ jobs:
         os: [ubuntu-latest]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 20
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
+      - uses: dtolnay/rust-toolchain@stable
       - name: Cache Dependencies
-        uses: Swatinem/rust-cache@ce325b60658c1b38465c06cc965b79baf32c1e72
+        uses: Swatinem/rust-cache@v2
       - name: Compile (no features)
         run: cargo test --no-run
       - name: Compile (all features)
         run: cargo test --no-run --all-features
       - name: Test
         run: cargo test --all-features -- --nocapture --quiet
-      # TODO: Re-enable this when git master there lands https://github.com/ostreedev/ostree-rs-ext/pull/123
-      # - name: Checkout ostree-rs-ext
-      #   uses: actions/checkout@v2
-      #   with:
-      #     repository: ostreedev/ostree-rs-ext
-      #     path: ostree-rs-ext
-      #     fetch-depth: 20
-      # - name: Test ostree-rs-ext
-      #   run: ./ci/test-ostree-rs-ext.sh
+      - name: Checkout ostree-rs-ext
+        uses: actions/checkout@v3
+        with:
+          repository: ostreedev/ostree-rs-ext
+          path: ostree-rs-ext
+          fetch-depth: 20
+      - name: Test ostree-rs-ext
+        run: ./ci/test-ostree-rs-ext.sh
   build-minimum-toolchain:
     name: "Build, minimum supported toolchain (MSRV)"
     runs-on: ubuntu-latest
     container: quay.io/coreos-assembler/fcos-buildroot:testing-devel
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
+      - name: Detect crate MSRV
+        shell: bash
+        run: |
+          msrv=$(cargo metadata --format-version 1 --no-deps | \
+              jq -r '.packages | .[0].rust_version')
+          echo "Crate MSRV: $msrv"
+          echo "ACTION_MSRV_TOOLCHAIN=$msrv" >> $GITHUB_ENV
       - name: Remove system Rust toolchain
         run: dnf remove -y rust cargo
-      - name: Install toolchain
-        uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env['ACTION_MSRV_TOOLCHAIN']  }}
-          default: true
       - name: Cache Dependencies
-        uses: Swatinem/rust-cache@ce325b60658c1b38465c06cc965b79baf32c1e72
-      - name: cargo build
-        run: cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - name: cargo check
+        run: cargo check
   linting:
     name: "Lints, pinned toolchain"
     runs-on: ubuntu-latest
@@ -86,11 +84,9 @@ jobs:
         uses: actions/checkout@v2
       - name: Remove system Rust toolchain
         run: dnf remove -y rust cargo
-      - name: Install toolchain
-        uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env['ACTION_LINTS_TOOLCHAIN']  }}
-          default: true
           components: rustfmt, clippy
       - name: cargo fmt (check)
         run: cargo fmt -- --check -l
