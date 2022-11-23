@@ -491,7 +491,10 @@ impl ImageProxy {
 
     ///Returns data that can be used to find the "diffid" corresponding to a particular layer.
     #[instrument]
-    pub async fn get_layer_info(&self, img: &OpenedImage) -> Result<Option<Vec<ConvertedLayerInfo>>> {
+    pub async fn get_layer_info(
+        &self,
+        img: &OpenedImage,
+    ) -> Result<Option<Vec<ConvertedLayerInfo>>> {
         tracing::debug!("Getting layer info");
         if !LAYER_INFO_PROTO_VERSION.matches(&self.protover) {
             return Ok(None);
