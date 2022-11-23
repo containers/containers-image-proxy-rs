@@ -380,6 +380,9 @@ impl ImageProxy {
         if fd.is_some() {
             return Err(anyhow!("Unexpected fd in finish_pipe reply"));
         }
+        if true {
+            anyhow::bail!("synthetic CI failure");
+        }
         Ok(r)
     }
 
