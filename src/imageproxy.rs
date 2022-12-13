@@ -82,11 +82,16 @@ type ChildFuture = Pin<
     Box<dyn Future<Output = std::result::Result<std::io::Result<std::process::Output>, JoinError>>>,
 >;
 
-/// Manage a child process proxy to fetch container images.
-pub struct ImageProxy {
-    sockfd: Arc<Mutex<File>>,
-    childwait: Arc<AsyncMutex<ChildFuture>>,
+struct ImageProxyInner {
+    sockfd: Mutex<File>,
+    childwait: AsyncMutex<ChildFuture>,
     protover: semver::Version,
+}
+
+/// Manage a child process proxy to fetch container images.
+#[derive(Clone)]
+pub struct ImageProxy {
+    inner: Arc<ImageProxyInner>,
 }
 
 impl std::fmt::Debug for ImageProxy {
@@ -270,16 +275,18 @@ impl ImageProxy {
         // which may also be in process.
         // xref https://github.com/tokio-rs/tokio/issues/3520#issuecomment-968985861
         let childwait = tokio::task::spawn_blocking(move || child.wait_with_output());
-        let sockfd = Arc::new(Mutex::new(mysock));
+        let sockfd = Mutex::new(mysock);
 
-        let mut r = Self {
+        let mut inner = Arc::new(ImageProxyInner {
             sockfd,
-            childwait: Arc::new(AsyncMutex::new(Box::pin(childwait))),
+            childwait: AsyncMutex::new(Box::pin(childwait)),
             protover: semver::Version::new(0, 0, 0),
-        };
+        });
 
         // Verify semantic version
-        let protover = r.impl_request::<String, _, ()>("Initialize", []).await?.0;
+        let protover = Self::impl_request::<String, _, ()>(Arc::clone(&inner), "Initialize", [])
+            .await?
+            .0;
         let protover = semver::Version::parse(protover.as_str())?;
         // Previously we had a feature to opt-in to requiring newer versions using `if cfg!()`.
         let supported = &*BASE_PROTO_VERSION;
@@ -290,13 +297,12 @@ impl ImageProxy {
                 supported
             ));
         }
-        r.protover = protover;
-
-        Ok(r)
+        Arc::<ImageProxyInner>::get_mut(&mut inner).unwrap().protover = protover;
+        Ok(Self { inner })
     }
 
     async fn impl_request_raw<T: serde::de::DeserializeOwned + Send + 'static>(
-        sockfd: Arc<Mutex<File>>,
+        sockfd: qg&Mutex<File>,
         req: Request,
     ) -> Result<(T, Option<(File, u32)>)> {
         tracing::trace!("sending request {}", req.method.as_str());
@@ -349,9 +355,9 @@ impl ImageProxy {
         Ok(r)
     }
 
-    #[instrument(skip(args))]
+    #[instrument(skip(inner, args))]
     async fn impl_request<R: serde::de::DeserializeOwned + Send + 'static, T, I>(
-        &self,
+        inner: Arc<ImageProxyInner>,
         method: &str,
         args: T,
     ) -> Result<(R, Option<(File, u32)>)>
@@ -359,8 +365,8 @@ impl ImageProxy {
         T: IntoIterator<Item = I>,
         I: Into<serde_json::Value>,
     {
-        let req = Self::impl_request_raw(Arc::clone(&self.sockfd), Request::new(method, args));
-        let mut childwait = self.childwait.lock().await;
+        let req = Self::impl_request_raw(&inner.sockfd, Request::new(method, args));
+        let mut childwait = inner.childwait.lock().await;
         tokio::select! {
             r = req => {
                 Ok(r.with_context(|| format!("Failed to invoke skopeo proxy method {method}"))?)
