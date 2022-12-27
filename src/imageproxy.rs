@@ -280,6 +280,7 @@ impl ImageProxy {
 
         // Verify semantic version
         let protover = r.impl_request::<String, _, ()>("Initialize", []).await?.0;
+        tracing::debug!("Remote protocol version: {protover}");
         let protover = semver::Version::parse(protover.as_str())?;
         // Previously we had a feature to opt-in to requiring newer versions using `if cfg!()`.
         let supported = &*BASE_PROTO_VERSION;
