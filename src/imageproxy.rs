@@ -9,7 +9,6 @@ use cap_std_ext::cap_std;
 use cap_std_ext::prelude::CapStdExtCommandExt;
 use futures_util::Future;
 use nix::sys::socket::{self as nixsocket, ControlMessageOwned};
-use nix::sys::uio::IoVec;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -309,14 +308,15 @@ impl ImageProxy {
             drop(sendbuf);
             let mut buf = [0u8; MAX_MSG_SIZE];
             let mut cmsg_buffer = nix::cmsg_space!([RawFd; 1]);
-            let iov = IoVec::from_mut_slice(buf.as_mut());
-            let r = nixsocket::recvmsg(
+            let iov = std::io::IoSliceMut::new(buf.as_mut());
+            let r = nixsocket::recvmsg::<()>(
                 sockfd.as_raw_fd(),
-                &[iov],
+                &mut [iov],
                 Some(&mut cmsg_buffer),
                 nixsocket::MsgFlags::MSG_CMSG_CLOEXEC,
             )?;
-            let buf = &buf[0..r.bytes];
+            // SAFETY: We provided a buffer
+            let iov = r.iovs().next().unwrap();
             let mut fdret: Option<File> = None;
             for cmsg in r.cmsgs() {
                 if let Some(f) = file_from_scm_rights(cmsg) {
@@ -324,7 +324,7 @@ impl ImageProxy {
                     break;
                 }
             }
-            let reply: Reply = serde_json::from_slice(buf).context("Deserializing reply")?;
+            let reply: Reply = serde_json::from_slice(iov).context("Deserializing reply")?;
             if !reply.success {
                 return Err(anyhow!("remote error: {}", reply.error));
             }
