@@ -24,6 +24,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinError;
 use tracing::instrument;
 
+/// Re-export because we use this in our public APIs
+pub use oci_spec;
+
 pub const OCI_TYPE_LAYER_GZIP: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
 pub const OCI_TYPE_LAYER_TAR: &str = "application/vnd.oci.image.layer.v1.tar";
 
