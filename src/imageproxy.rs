@@ -186,8 +186,10 @@ impl TryFrom<ImageProxyConfig> for Command {
             let mut c = std::process::Command::new("skopeo");
             unsafe {
                 c.pre_exec(|| {
-                    capctl::prctl::set_pdeathsig(Some(libc::SIGTERM))
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                    rustix::process::set_parent_process_death_signal(Some(
+                        rustix::process::Signal::Term,
+                    ))
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
                 });
             }
             c

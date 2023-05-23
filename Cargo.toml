@@ -10,13 +10,13 @@ rust-version = "1.58.0"
 
 [dependencies]
 anyhow = "1.0"
-capctl = "0.2.0"
 fn-error-context = "0.2.0"
 futures-util = "0.3.13"
 nix = "0.26"
 oci-spec = "0.5.5"
 once_cell = "1.9.0"
 libc = "0.2"
+rustix = { version = "0.37", features = ["process"] }
 serde = { features = ["derive"], version = "1.0.125" }
 serde_json = "1.0.64"
 semver = "1.0.4"
