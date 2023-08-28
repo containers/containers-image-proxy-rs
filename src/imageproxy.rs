@@ -314,9 +314,10 @@ impl ImageProxy {
             let mut buf = [0u8; MAX_MSG_SIZE];
             let mut cmsg_buffer = nix::cmsg_space!([RawFd; 1]);
             let iov = std::io::IoSliceMut::new(buf.as_mut());
+            let mut iov = [iov];
             let r = nixsocket::recvmsg::<()>(
                 sockfd.as_raw_fd(),
-                &mut [iov],
+                &mut iov,
                 Some(&mut cmsg_buffer),
                 nixsocket::MsgFlags::MSG_CMSG_CLOEXEC,
             )?;
