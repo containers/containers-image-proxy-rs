@@ -118,7 +118,7 @@ fn new_seqpacket_pair() -> Result<(File, File)> {
 #[allow(unsafe_code)]
 fn file_from_scm_rights(cmsg: ControlMessageOwned) -> Option<File> {
     if let nixsocket::ControlMessageOwned::ScmRights(fds) = cmsg {
-        fds.get(0)
+        fds.first()
             .map(|&fd| unsafe { std::fs::File::from_raw_fd(fd) })
     } else {
         None
@@ -314,9 +314,10 @@ impl ImageProxy {
             let mut buf = [0u8; MAX_MSG_SIZE];
             let mut cmsg_buffer = nix::cmsg_space!([RawFd; 1]);
             let iov = std::io::IoSliceMut::new(buf.as_mut());
+            let mut iov = [iov];
             let r = nixsocket::recvmsg::<()>(
                 sockfd.as_raw_fd(),
-                &mut [iov],
+                &mut iov,
                 Some(&mut cmsg_buffer),
                 nixsocket::MsgFlags::MSG_CMSG_CLOEXEC,
             )?;
@@ -374,7 +375,7 @@ impl ImageProxy {
             r = childwait.as_mut() => {
                 let r = r??;
                 let stderr = String::from_utf8_lossy(&r.stderr);
-                return Err(anyhow::anyhow!("skopeo proxy unexpectedly exited during request method {}: {}\n{}", method, r.status, stderr))
+                Err(anyhow::anyhow!("skopeo proxy unexpectedly exited during request method {}: {}\n{}", method, r.status, stderr))
             }
         }
     }
@@ -466,7 +467,7 @@ impl ImageProxy {
         img: &OpenedImage,
     ) -> Result<oci_spec::image::ImageConfiguration> {
         let raw = self.fetch_config_raw(img).await?;
-        Ok(serde_json::from_slice(&raw).context("Deserializing config from skopeo")?)
+        serde_json::from_slice(&raw).context("Deserializing config from skopeo")
     }
 
     /// Fetch a blob identified by e.g. `sha256:<digest>`.
