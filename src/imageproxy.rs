@@ -5,8 +5,8 @@
 //! More information: <https://github.com/containers/skopeo/pull/1476>
 
 use anyhow::{anyhow, Context, Result};
-use cap_std_ext::cap_std;
 use cap_std_ext::prelude::CapStdExtCommandExt;
+use cap_std_ext::{cap_std, cap_tempfile};
 use futures_util::Future;
 use nix::sys::socket::{self as nixsocket, ControlMessageOwned};
 use once_cell::sync::Lazy;
