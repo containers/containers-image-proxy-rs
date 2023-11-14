@@ -119,6 +119,10 @@ pub struct ImageProxyConfig {
     // Equivalent to `skopeo --cert-dir`
     pub certificate_directory: Option<PathBuf>,
 
+    /// Decryption keys to decrypt an encrypted container image.
+    /// equivalent to `skopeo copy --decryption-key <path_to_decryption_key> `
+    pub decryption_keys: Option<Vec<String>>,
+
     /// If set, disable TLS verification.  Equivalent to `skopeo --tls-verify=false`.
     pub insecure_skip_tls_verification: Option<bool>,
 
@@ -208,6 +212,14 @@ impl TryFrom<ImageProxyConfig> for Command {
             c.arg("--cert-dir");
             c.arg(certificate_directory);
         }
+
+        if let Some(decryption_keys) = config.decryption_keys {
+            for decryption_key in &decryption_keys {
+                c.arg("--decryption-key");
+                c.arg(decryption_key);
+            }
+        }
+
         if config.insecure_skip_tls_verification.unwrap_or_default() {
             c.arg("--tls-verify=false");
         }
@@ -554,6 +566,14 @@ mod tests {
         })
         .unwrap();
         validate(c, &[r"--authfile", "/path/to/authfile"], &[]);
+
+        let decryption_key_path = "/path/to/decryption_key";
+        let c = Command::try_from(ImageProxyConfig {
+            decryption_keys: Some(vec![decryption_key_path.to_string()]),
+            ..Default::default()
+        })
+        .unwrap();
+        validate(c, &[r"--decryption-key", "/path/to/decryption_key"], &[]);
 
         let c = Command::try_from(ImageProxyConfig {
             certificate_directory: Some(PathBuf::from("/path/to/certs")),
