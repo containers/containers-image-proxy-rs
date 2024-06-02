@@ -8,7 +8,6 @@ use anyhow::{anyhow, Context, Result};
 use cap_std_ext::prelude::CapStdExtCommandExt;
 use cap_std_ext::{cap_std, cap_tempfile};
 use futures_util::Future;
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::ops::Range;
@@ -17,7 +16,7 @@ use std::os::unix::prelude::CommandExt;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::{AsyncBufRead, AsyncReadExt};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinError;
@@ -38,11 +37,16 @@ pub const RESERVED_FD_RANGE: Range<i32> = 100..200;
 // Note that payload data (non-metadata) should go over a pipe file descriptor.
 const MAX_MSG_SIZE: usize = 32 * 1024;
 
-// Introduced in https://github.com/containers/skopeo/pull/1523
-static BASE_PROTO_VERSION: Lazy<semver::VersionReq> =
-    Lazy::new(|| semver::VersionReq::parse("0.2.3").unwrap());
-static LAYER_INFO_PROTO_VERSION: Lazy<semver::VersionReq> =
-    Lazy::new(|| semver::VersionReq::parse("0.2.5").unwrap());
+fn base_proto_version() -> &'static semver::VersionReq {
+    // Introduced in https://github.com/containers/skopeo/pull/1523
+    static BASE_PROTO_VERSION: OnceLock<semver::VersionReq> = OnceLock::new();
+    BASE_PROTO_VERSION.get_or_init(|| semver::VersionReq::parse("0.2.3").unwrap())
+}
+
+fn layer_info_proto_version() -> &'static semver::VersionReq {
+    static LAYER_INFO_PROTO_VERSION: OnceLock<semver::VersionReq> = OnceLock::new();
+    LAYER_INFO_PROTO_VERSION.get_or_init(|| semver::VersionReq::parse("0.2.5").unwrap())
+}
 
 #[derive(Serialize)]
 struct Request {
@@ -279,7 +283,7 @@ impl ImageProxy {
         tracing::debug!("Remote protocol version: {protover}");
         let protover = semver::Version::parse(protover.as_str())?;
         // Previously we had a feature to opt-in to requiring newer versions using `if cfg!()`.
-        let supported = &*BASE_PROTO_VERSION;
+        let supported = base_proto_version();
         if !supported.matches(&protover) {
             return Err(anyhow!(
                 "Unsupported protocol version {} (compatible: {})",
@@ -500,7 +504,7 @@ impl ImageProxy {
         img: &OpenedImage,
     ) -> Result<Option<Vec<ConvertedLayerInfo>>> {
         tracing::debug!("Getting layer info");
-        if !LAYER_INFO_PROTO_VERSION.matches(&self.protover) {
+        if !layer_info_proto_version().matches(&self.protover) {
             return Ok(None);
         }
         let reply = self.impl_request("GetLayerInfo", [img.0]).await?;
