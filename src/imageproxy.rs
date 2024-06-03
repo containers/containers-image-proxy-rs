@@ -25,9 +25,6 @@ use tracing::instrument;
 /// Re-export because we use this in our public APIs
 pub use oci_spec;
 
-pub const OCI_TYPE_LAYER_GZIP: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
-pub const OCI_TYPE_LAYER_TAR: &str = "application/vnd.oci.image.layer.v1.tar";
-
 /// File descriptor range which is reserved for passing data down into the proxy;
 /// avoid configuring the command to use files in this range.  (Also, stdin is
 /// reserved)
@@ -399,7 +396,6 @@ impl ImageProxy {
     }
 
     #[instrument]
-    #[cfg(feature = "proxy_v0_2_4")]
     pub async fn open_image_optional(&self, imgref: &str) -> Result<Option<OpenedImage>> {
         tracing::debug!("opening image");
         let (imgid, _) = self
