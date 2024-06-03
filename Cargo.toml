@@ -30,7 +30,3 @@ clap = { version = "4.4", features = ["derive"] }
 
 [lib]
 path = "src/imageproxy.rs"
-
-[features]
-# See https://github.com/containers/skopeo/blob/03da797e42374892bca8759668adb0b06d087876/cmd/skopeo/proxy.go#L95
-proxy_v0_2_4 = []

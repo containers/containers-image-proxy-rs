@@ -399,7 +399,6 @@ impl ImageProxy {
     }
 
     #[instrument]
-    #[cfg(feature = "proxy_v0_2_4")]
     pub async fn open_image_optional(&self, imgref: &str) -> Result<Option<OpenedImage>> {
         tracing::debug!("opening image");
         let (imgid, _) = self
