@@ -46,7 +46,11 @@ jobs:
       - name: Checkout ostree-rs-ext
         uses: actions/checkout@v3
         with:
-          repository: ostreedev/ostree-rs-ext
+          # repository: ostreedev/ostree-rs-ext
+          # Temporary fork until https://github.com/ostreedev/ostree-rs-ext/pull/663
+          # is published in a release
+          repository: jeckersb/ostree-rs-ext
+          ref: ocidir-0.3
           path: ostree-rs-ext
           fetch-depth: 20
       - name: Test ostree-rs-ext
