@@ -8,6 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use cap_std_ext::prelude::CapStdExtCommandExt;
 use cap_std_ext::{cap_std, cap_tempfile};
 use futures_util::Future;
+use oci_spec::image::{Descriptor, Digest};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::ops::Range;
@@ -234,10 +235,10 @@ impl TryFrom<ImageProxyConfig> for Command {
 pub struct ConvertedLayerInfo {
     /// Uncompressed digest of a layer; for more information, see
     /// https://github.com/opencontainers/image-spec/blob/main/config.md#layer-diffid
-    pub digest: String,
+    pub digest: Digest,
 
     /// Size of blob
-    pub size: i64,
+    pub size: u64,
 
     /// Mediatype of blob
     pub media_type: oci_spec::image::MediaType,
@@ -474,7 +475,7 @@ impl ImageProxy {
     pub async fn get_blob(
         &self,
         img: &OpenedImage,
-        digest: &str,
+        digest: &Digest,
         size: u64,
     ) -> Result<(
         impl AsyncBufRead + Send + Unpin,
@@ -491,6 +492,20 @@ impl ImageProxy {
         let fd = tokio::io::BufReader::new(fd);
         let finish = Box::pin(self.finish_pipe(pipeid));
         Ok((fd, finish))
+    }
+
+    /// Fetch a descriptor. The requested size and digest are verified (by the proxy process).
+    #[instrument]
+    pub async fn get_descriptor(
+        &self,
+        img: &OpenedImage,
+        descriptor: &Descriptor,
+    ) -> Result<(
+        impl AsyncBufRead + Send + Unpin,
+        impl Future<Output = Result<()>> + Unpin + '_,
+    )> {
+        self.get_blob(img, descriptor.digest(), descriptor.size())
+            .await
     }
 
     ///Returns data that can be used to find the "diffid" corresponding to a particular layer.

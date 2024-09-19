@@ -2,7 +2,7 @@ use std::io::Write;
 
 use anyhow::Result;
 use clap::Parser;
-use oci_spec::image::ImageManifest;
+use oci_spec::image::{Digest, ImageManifest};
 use tokio::io::AsyncReadExt;
 
 #[derive(clap::Parser, Debug)]
@@ -17,7 +17,7 @@ struct GetBlobOpts {
     reference: String,
 
     /// The digest of the target blob to fetch
-    digest: String,
+    digest: Digest,
 
     /// The size of the blob to fetch
     size: u64,
