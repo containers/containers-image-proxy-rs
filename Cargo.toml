@@ -5,11 +5,10 @@ license = "MIT OR Apache-2.0"
 name = "containers-image-proxy"
 readme = "README.md"
 repository = "https://github.com/containers/containers-image-proxy-rs"
-version = "0.6.0"
+version = "0.7.0"
 rust-version = "1.70.0"
 
 [dependencies]
-anyhow = "1.0"
 fn-error-context = "0.2.0"
 futures-util = "0.3.13"
 # NOTE when bumping this in a semver-incompatible way, because we re-export it you
@@ -19,12 +18,14 @@ rustix = { version = "0.38", features = ["process", "net"] }
 serde = { features = ["derive"], version = "1.0.125" }
 serde_json = "1.0.64"
 semver = "1.0.4"
+thiserror = "1"
 tokio = { features = ["fs", "io-util", "macros", "process", "rt", "sync"], version = "1" }
 tracing = "0.1"
 # We support versions 2, 3 and 4
 cap-std-ext = ">= 2.0, <= 4.0"
 
 [dev-dependencies]
+anyhow = "1.0"
 bytes = "1.5"
 clap = { version = "4.4", features = ["derive"] }
 
