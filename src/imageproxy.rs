@@ -175,6 +175,11 @@ pub struct ImageProxyConfig {
     /// If set, disable TLS verification.  Equivalent to `skopeo --tls-verify=false`.
     pub insecure_skip_tls_verification: Option<bool>,
 
+    /// If enabled, propagate debug-logging level from the proxy via stderr to the
+    /// current process' stderr. Note than when enabled, this also means that standard
+    /// error will no longer be captured.
+    pub debug: bool,
+
     /// Provide a configured [`std::process::Command`] instance.
     ///
     /// This allows configuring aspects of the resulting child `skopeo` process.
@@ -202,6 +207,7 @@ impl TryFrom<ImageProxyConfig> for Command {
     type Error = Error;
 
     fn try_from(config: ImageProxyConfig) -> Result<Self> {
+        let debug = config.debug || std::env::var_os("CONTAINERS_IMAGE_PROXY_DEBUG").is_some();
         let mut allocated_fds = RESERVED_FD_RANGE.clone();
         let mut alloc_fd = || {
             allocated_fds.next().ok_or_else(|| {
@@ -223,6 +229,9 @@ impl TryFrom<ImageProxyConfig> for Command {
             c
         });
         c.arg("experimental-image-proxy");
+        if debug {
+            c.arg("--debug");
+        }
         let auth_option_count = [
             config.authfile.is_some(),
             config.auth_data.is_some(),
@@ -276,7 +285,10 @@ impl TryFrom<ImageProxyConfig> for Command {
         if config.insecure_skip_tls_verification.unwrap_or_default() {
             c.arg("--tls-verify=false");
         }
-        c.stdout(Stdio::null()).stderr(Stdio::piped());
+        c.stdout(Stdio::null());
+        if !debug {
+            c.stderr(Stdio::piped());
+        }
         Ok(c)
     }
 }
