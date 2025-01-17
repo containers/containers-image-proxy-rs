@@ -30,6 +30,9 @@ pub enum Error {
     #[error("i/o error")]
     /// An input/output error
     Io(#[from] std::io::Error),
+    #[error("skopeo spawn error: {}", .0)]
+    /// An error spawning skopeo
+    SkopeoSpawnError(#[source] std::io::Error),
     #[error("serialization error")]
     /// Returned when serialization or deserialization fails
     SerDe(#[from] serde_json::Error),
@@ -324,7 +327,10 @@ impl ImageProxy {
             None,
         )?;
         c.stdin(Stdio::from(theirsock));
-        let child = c.spawn()?;
+        let child = match c.spawn() {
+            Ok(c) => c,
+            Err(error) => return Err(Error::SkopeoSpawnError(error)),
+        };
         tracing::debug!("Spawned skopeo pid={:?}", child.id());
         // Here we use std sync API via thread because tokio installs
         // a SIGCHLD handler which can conflict with e.g. the glib one
@@ -686,5 +692,20 @@ mod tests {
         })
         .unwrap();
         validate(c, &["--authfile", "/proc/self/fd/100"], &[]);
+    }
+
+    #[tokio::test]
+    async fn skopeo_not_found() {
+        let mut config = ImageProxyConfig {
+            ..ImageProxyConfig::default()
+        };
+        config.skopeo_cmd = Some(Command::new("no-skopeo"));
+
+        let res = ImageProxy::new_with_config(config).await;
+        assert!(matches!(res, Err(Error::SkopeoSpawnError(_))));
+        assert_eq!(
+            res.err().unwrap().to_string(),
+            "skopeo spawn error: No such file or directory (os error 2)"
+        );
     }
 }
