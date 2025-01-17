@@ -701,11 +701,16 @@ mod tests {
         };
         config.skopeo_cmd = Some(Command::new("no-skopeo"));
 
-        let res = ImageProxy::new_with_config(config).await;
-        assert!(matches!(res, Err(Error::SkopeoSpawnError(_))));
-        assert_eq!(
-            res.err().unwrap().to_string(),
-            "skopeo spawn error: No such file or directory (os error 2)"
-        );
+        match ImageProxy::new_with_config(config).await {
+            Ok(_) => panic!("Expected an error"),
+            Err(ref e @ Error::SkopeoSpawnError(ref inner)) => {
+                assert_eq!(inner.kind(), std::io::ErrorKind::NotFound);
+                // Just to double check
+                assert!(e
+                    .to_string()
+                    .contains("skopeo spawn error: No such file or directory"));
+            }
+            Err(e) => panic!("Unexpected error {e}"),
+        }
     }
 }
