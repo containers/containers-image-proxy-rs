@@ -2,6 +2,7 @@ use std::io::Write;
 
 use anyhow::Result;
 use clap::Parser;
+use containers_image_proxy::ImageProxyConfig;
 use oci_spec::image::{Digest, ImageManifest};
 use tokio::io::AsyncReadExt;
 
@@ -9,6 +10,10 @@ use tokio::io::AsyncReadExt;
 struct GetMetadataOpts {
     /// The skopeo-style transport:image reference
     reference: String,
+
+    /// Disable TLS verification
+    #[clap(long)]
+    insecure: bool,
 }
 
 #[derive(clap::Parser, Debug)]
@@ -29,6 +34,7 @@ struct GetBlobOpts {
 enum Opt {
     GetMetadata(GetMetadataOpts),
     GetBlob(GetBlobOpts),
+    FetchContainerToDevNull(GetMetadataOpts),
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -37,8 +43,19 @@ struct Metadata {
     manifest: ImageManifest,
 }
 
+impl GetMetadataOpts {
+    fn proxy_opts(&self) -> containers_image_proxy::ImageProxyConfig {
+        let mut r = ImageProxyConfig::default();
+        if self.insecure {
+            r.insecure_skip_tls_verification = Some(true)
+        }
+        r
+    }
+}
+
 async fn get_metadata(o: GetMetadataOpts) -> Result<()> {
-    let proxy = containers_image_proxy::ImageProxy::new().await?;
+    let config = o.proxy_opts();
+    let proxy = containers_image_proxy::ImageProxy::new_with_config(config).await?;
     let img = proxy.open_image(&o.reference).await?;
     let (digest, manifest) = proxy.fetch_manifest(&img).await?;
     let metadata = Metadata { digest, manifest };
@@ -69,10 +86,29 @@ async fn get_blob(o: GetBlobOpts) -> Result<()> {
     Ok(())
 }
 
+async fn fetch_container_to_devnull(o: GetMetadataOpts) -> Result<()> {
+    let config = o.proxy_opts();
+    let proxy = containers_image_proxy::ImageProxy::new_with_config(config).await?;
+    let img = &proxy.open_image(&o.reference).await?;
+    let manifest = proxy.fetch_manifest(img).await?.1;
+    for layer in manifest.layers() {
+        let (mut blob, driver) = proxy.get_descriptor(img, layer).await?;
+        let mut devnull = tokio::io::sink();
+        let copier = tokio::io::copy(&mut blob, &mut devnull);
+        let (copier, driver) = tokio::join!(copier, driver);
+        dbg!(&copier);
+        dbg!(&driver);
+        copier?;
+        driver?;
+    }
+    Ok(())
+}
+
 async fn run() -> Result<()> {
     match Opt::parse() {
         Opt::GetMetadata(o) => get_metadata(o).await,
         Opt::GetBlob(o) => get_blob(o).await,
+        Opt::FetchContainerToDevNull(o) => fetch_container_to_devnull(o).await,
     }
 }
 
