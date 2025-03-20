@@ -29,6 +29,7 @@ struct GetBlobOpts {
 enum Opt {
     GetMetadata(GetMetadataOpts),
     GetBlob(GetBlobOpts),
+    FetchContainerToDevNull(GetMetadataOpts),
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -69,10 +70,28 @@ async fn get_blob(o: GetBlobOpts) -> Result<()> {
     Ok(())
 }
 
+async fn fetch_container_to_devnull(o: GetMetadataOpts) -> Result<()> {
+    let proxy = containers_image_proxy::ImageProxy::new().await?;
+    let img = &proxy.open_image(&o.reference).await?;
+    let manifest = proxy.fetch_manifest(img).await?.1;
+    for layer in manifest.layers() {
+        let (mut blob, driver) = proxy.get_descriptor(img, layer).await?;
+        let mut devnull = tokio::io::sink();
+        let copier = tokio::io::copy(&mut blob, &mut devnull);
+        let (copier, driver) = tokio::join!(copier, driver);
+        dbg!(&copier);
+        dbg!(&driver);
+        copier?;
+        driver?;
+    }
+    Ok(())
+}
+
 async fn run() -> Result<()> {
     match Opt::parse() {
         Opt::GetMetadata(o) => get_metadata(o).await,
         Opt::GetBlob(o) => get_blob(o).await,
+        Opt::FetchContainerToDevNull(o) => fetch_container_to_devnull(o).await,
     }
 }
 
