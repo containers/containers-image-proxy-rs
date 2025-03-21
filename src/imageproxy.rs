@@ -96,6 +96,11 @@ fn layer_info_proto_version() -> &'static semver::VersionReq {
     LAYER_INFO_PROTO_VERSION.get_or_init(|| semver::VersionReq::parse("0.2.5").unwrap())
 }
 
+fn layer_info_piped_proto_version() -> &'static semver::VersionReq {
+    static LAYER_INFO_PROTO_VERSION: OnceLock<semver::VersionReq> = OnceLock::new();
+    LAYER_INFO_PROTO_VERSION.get_or_init(|| semver::VersionReq::parse("0.2.7").unwrap())
+}
+
 #[derive(Serialize)]
 struct Request {
     method: String,
@@ -597,6 +602,13 @@ impl ImageProxy {
         img: &OpenedImage,
     ) -> Result<Option<Vec<ConvertedLayerInfo>>> {
         tracing::debug!("Getting layer info");
+        if layer_info_piped_proto_version().matches(&self.protover) {
+            let (_, fd) = self
+                .impl_request::<(), _, _>("GetLayerInfoPiped", [img.0])
+                .await?;
+            let buf = self.read_all_fd(fd).await?;
+            return Ok(Some(serde_json::from_slice(&buf)?));
+        }
         if !layer_info_proto_version().matches(&self.protover) {
             return Ok(None);
         }
