@@ -96,8 +96,6 @@ async fn fetch_container_to_devnull(o: GetMetadataOpts) -> Result<()> {
         let mut devnull = tokio::io::sink();
         let copier = tokio::io::copy(&mut blob, &mut devnull);
         let (copier, driver) = tokio::join!(copier, driver);
-        dbg!(&copier);
-        dbg!(&driver);
         copier?;
         driver?;
     }
