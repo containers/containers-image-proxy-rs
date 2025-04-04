@@ -550,6 +550,11 @@ impl ImageProxy {
     /// <https://github.com/opencontainers/image-spec/blob/main/descriptor.md>
     ///
     /// The requested size and digest are verified (by the proxy process).
+    ///
+    /// Note that because of the implementation details of this function, you should
+    /// [`futures::join!`] the returned futures instead of polling one after the other. The
+    /// secondary "driver" future will only return once everything has been read from
+    /// the reader future.
     #[instrument]
     pub async fn get_blob(
         &self,
@@ -568,7 +573,9 @@ impl ImageProxy {
         let (_bloblen, fd) = self.impl_request::<i64, _, _>("GetBlob", args).await?;
         let (fd, pipeid) = fd.ok_or_else(|| Error::new_other("Missing fd from reply"))?;
         let fd = tokio::fs::File::from_std(std::fs::File::from(fd));
-        let fd = tokio::io::BufReader::new(fd);
+        // We only read up to the object size, ref https://github.com/containers/containers-image-proxy-rs/issues/71
+        // This is a fallback to handle the case where the caller polls the two futures serially.
+        let fd = tokio::io::BufReader::new(fd).take(size);
         let finish = Box::pin(self.finish_pipe(pipeid));
         Ok((fd, finish))
     }

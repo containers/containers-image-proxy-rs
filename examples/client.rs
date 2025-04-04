@@ -94,10 +94,13 @@ async fn fetch_container_to_devnull(o: GetMetadataOpts) -> Result<()> {
     for layer in manifest.layers() {
         let (mut blob, driver) = proxy.get_descriptor(img, layer).await?;
         let mut devnull = tokio::io::sink();
-        let copier = tokio::io::copy(&mut blob, &mut devnull);
-        let (copier, driver) = tokio::join!(copier, driver);
-        copier?;
-        driver?;
+        // This is the preferred way to handle this:
+        //   let copier = tokio::io::copy(&mut blob, &mut devnull);
+        //   let (copier, driver) = tokio::join!(copier, driver);
+        // But in our example code here we do it serially to verify it works.
+        // ref https://github.com/containers/containers-image-proxy-rs/issues/71
+        tokio::io::copy(&mut blob, &mut devnull).await?;
+        driver.await?;
     }
     Ok(())
 }
