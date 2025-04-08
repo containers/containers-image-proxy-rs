@@ -545,6 +545,11 @@ impl ImageProxy {
     /// <https://github.com/opencontainers/image-spec/blob/main/descriptor.md>
     ///
     /// The requested size and digest are verified (by the proxy process).
+    ///
+    /// Note that because of the implementation details of this function, you should
+    /// [`futures::join!`] the returned futures instead of polling one after the other. The
+    /// secondary "driver" future will only return once everything has been read from
+    /// the reader future.
     #[instrument]
     pub async fn get_blob(
         &self,
