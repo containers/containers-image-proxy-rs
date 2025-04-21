@@ -132,7 +132,10 @@ struct Reply {
 }
 
 type ChildFuture = Pin<
-    Box<dyn Future<Output = std::result::Result<std::io::Result<std::process::Output>, JoinError>>>,
+    Box<
+        dyn Future<Output = std::result::Result<std::io::Result<std::process::Output>, JoinError>>
+            + Send,
+    >,
 >;
 
 /// Manage a child process proxy to fetch container images.
@@ -717,5 +720,21 @@ mod tests {
             }
             Err(e) => panic!("Unexpected error {e}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_proxy_send_sync() {
+        fn assert_send_sync(_x: impl Send + Sync) {}
+
+        let Ok(proxy) = ImageProxy::new().await else {
+            // doesn't matter: we only actually care to test if this compiles
+            return;
+        };
+        assert_send_sync(&proxy);
+        assert_send_sync(proxy);
+
+        let opened = OpenedImage(0);
+        assert_send_sync(&opened);
+        assert_send_sync(opened);
     }
 }
