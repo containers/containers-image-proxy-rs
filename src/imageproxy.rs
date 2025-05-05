@@ -446,12 +446,7 @@ impl ImageProxy {
         let req = Self::impl_request_raw(Arc::clone(&self.sockfd), Request::new(method, args));
         let mut childwait = self.childwait.lock().await;
         tokio::select! {
-            r = req => {
-                r.map_err(|e| Error::RequestInitiationFailure {
-                    method: method.to_string().into(),
-                    error: e.to_string().into()
-            })
-            }
+            r = req => { r }
             r = childwait.as_mut() => {
                 let r = r.map_err(|e| Error::Other(e.to_string().into()))??;
                 let stderr = String::from_utf8_lossy(&r.stderr);
