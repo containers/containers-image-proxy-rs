@@ -28,13 +28,24 @@ struct GetBlobOpts {
     size: u64,
 }
 
+#[derive(clap::Parser, Debug)]
+struct FetchContainerToDevNullOpts {
+    #[clap(flatten)]
+    metaopts: GetMetadataOpts,
+
+    /// Use the "raw" path for fetching blobs
+    #[clap(long)]
+    raw_blobs: bool,
+}
+
 /// Simple program to greet a person
 #[derive(clap::Parser, Debug)]
 #[command(version, about, long_about = None)]
 enum Opt {
     GetMetadata(GetMetadataOpts),
     GetBlob(GetBlobOpts),
-    FetchContainerToDevNull(GetMetadataOpts),
+    GetBlobRaw(GetBlobOpts),
+    FetchContainerToDevNull(FetchContainerToDevNullOpts),
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -86,18 +97,49 @@ async fn get_blob(o: GetBlobOpts) -> Result<()> {
     Ok(())
 }
 
-async fn fetch_container_to_devnull(o: GetMetadataOpts) -> Result<()> {
-    let config = o.proxy_opts();
+async fn get_blob_raw(o: GetBlobOpts) -> Result<()> {
+    let proxy = containers_image_proxy::ImageProxy::new().await?;
+    let img = proxy.open_image(&o.reference).await?;
+    let (_, mut datafd, err) = proxy.get_raw_blob(&img, &o.digest).await?;
+
+    let mut stdout = std::io::stdout().lock();
+    let reader = async move {
+        let mut buffer = [0u8; 8192];
+        loop {
+            let n = datafd.read(&mut buffer).await?;
+            if n == 0 {
+                return anyhow::Ok(());
+            }
+            stdout.write_all(&buffer[..n])?;
+        }
+    };
+
+    let (a, b) = tokio::join!(reader, err);
+    a?;
+    b?;
+    Ok(())
+}
+
+async fn fetch_container_to_devnull(o: FetchContainerToDevNullOpts) -> Result<()> {
+    let config = o.metaopts.proxy_opts();
     let proxy = containers_image_proxy::ImageProxy::new_with_config(config).await?;
-    let img = &proxy.open_image(&o.reference).await?;
+    let img = &proxy.open_image(&o.metaopts.reference).await?;
     let manifest = proxy.fetch_manifest(img).await?.1;
     for layer in manifest.layers() {
-        let (mut blob, driver) = proxy.get_descriptor(img, layer).await?;
         let mut devnull = tokio::io::sink();
-        let copier = tokio::io::copy(&mut blob, &mut devnull);
-        let (copier, driver) = tokio::join!(copier, driver);
-        copier?;
-        driver?;
+        if o.raw_blobs {
+            let (_, mut blob, err) = proxy.get_raw_blob(img, layer.digest()).await?;
+            let copier = tokio::io::copy(&mut blob, &mut devnull);
+            let (copier, err) = tokio::join!(copier, err);
+            copier?;
+            err?;
+        } else {
+            let (mut blob, driver) = proxy.get_descriptor(img, layer).await?;
+            let copier = tokio::io::copy(&mut blob, &mut devnull);
+            let (copier, driver) = tokio::join!(copier, driver);
+            copier?;
+            driver?;
+        }
     }
     Ok(())
 }
@@ -106,6 +148,7 @@ async fn run() -> Result<()> {
     match Opt::parse() {
         Opt::GetMetadata(o) => get_metadata(o).await,
         Opt::GetBlob(o) => get_blob(o).await,
+        Opt::GetBlobRaw(o) => get_blob_raw(o).await,
         Opt::FetchContainerToDevNull(o) => fetch_container_to_devnull(o).await,
     }
 }
