@@ -10,6 +10,7 @@ use futures_util::{Future, FutureExt};
 use oci_spec::image::{Descriptor, Digest};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
+use std::iter::FusedIterator;
 use std::num::NonZeroU32;
 use std::ops::Range;
 use std::os::fd::OwnedFd;
@@ -173,6 +174,15 @@ impl std::fmt::Debug for ImageProxy {
 #[derive(Debug, PartialEq, Eq)]
 pub struct OpenedImage(u32);
 
+#[derive(Debug, PartialEq, Eq)]
+struct PipeId(NonZeroU32);
+
+impl PipeId {
+    fn try_new(pipeid: u32) -> Option<Self> {
+        Some(Self(NonZeroU32::new(pipeid)?))
+    }
+}
+
 /// Configuration for the proxy.
 #[derive(Debug, Default)]
 pub struct ImageProxyConfig {
@@ -331,62 +341,30 @@ pub struct ConvertedLayerInfo {
     pub media_type: oci_spec::image::MediaType,
 }
 
-/// Maps the two types of return values from the proxy.
-/// For more information, see <https://github.com/containers/skopeo/blob/dc88f3211b0f32ffef6eca3dfba86c24985ada1e/docs-experimental/skopeo-experimental-image-proxy.1.md>
-#[derive(Debug)]
-enum FileDescriptors {
-    /// There is a data file descriptor, and the calling
-    /// process must invoke FinishPipe to check for errors.
-    /// The client will not get EOF until FinishPipe has been invoked.
-    FinishPipe { pipeid: NonZeroU32, datafd: OwnedFd },
-    /// There is a data FD and an error FD. The error FD will
-    /// be JSON.
-    DualFds { datafd: OwnedFd, errfd: OwnedFd },
-}
+// Consumes an iterable and tries to convert it to a fixed-size array.  Returns Ok([T; N]) if the
+// number of items in the iterable was correct, else an error describing the mismatch.
+fn fixed_from_iterable<T, const N: usize>(
+    iterable: impl IntoIterator<IntoIter: FusedIterator, Item = T>,
+) -> Result<[T; N]> {
+    let mut iter = iterable.into_iter();
+    // We make use of the fact that [_; N].map() returns [_; N].  That makes this a bit more
+    // awkward than it would otherwise be, but it's not too bad.
+    let collected = [(); N].map(|_| iter.next());
+    // Count the Some() in `collected` plus leftovers in the iter.
+    let actual = collected.iter().flatten().count() + iter.count();
+    if actual == N {
+        // SAFETY: This is a fused iter, so all N items are in our array
+        Ok(collected.map(Option::unwrap))
+    } else {
+        let type_name = std::any::type_name::<T>();
+        let basename = type_name
+            .rsplit_once("::")
+            .map(|(_path, name)| name)
+            .unwrap_or(type_name);
 
-impl FileDescriptors {
-    /// Given a return value from the proxy, parse it into one of the three
-    /// possible cases:
-    /// - No file descriptors
-    /// - A FinishPipe instance
-    /// - A DualFds instance
-    fn new_from_raw_values(
-        fds: impl Iterator<Item = OwnedFd>,
-        pipeid: u32,
-    ) -> Result<Option<Self>> {
-        let mut fds = fds.fuse();
-        let first_fd = fds.next();
-        let second_fd = fds.next();
-        if fds.next().is_some() {
-            return Err(Error::Other("got more than two file descriptors".into()));
-        }
-        let pipeid = NonZeroU32::new(pipeid);
-        let r = match (first_fd, second_fd, pipeid) {
-            // No fds, no pipeid
-            (None, None, None) => None,
-            // A FinishPipe instance
-            (Some(datafd), None, Some(pipeid)) => {
-                Some(FileDescriptors::FinishPipe { pipeid, datafd })
-            }
-            // A dualfd instance
-            (Some(datafd), Some(errfd), None) => Some(FileDescriptors::DualFds { datafd, errfd }),
-            // Everything after here is error cases
-            (Some(_), None, None) => {
-                return Err(Error::Other("got fd with zero pipeid".into()));
-            }
-            (None, Some(_), _) => {
-                return Err(Error::Other("got errfd with no datafd".into()));
-            }
-            (Some(_), Some(_), Some(n)) => {
-                return Err(Error::Other(
-                    format!("got pipeid {} with both datafd and errfd", n).into(),
-                ));
-            }
-            (None, _, Some(n)) => {
-                return Err(Error::Other(format!("got no fd with pipeid {n}").into()));
-            }
-        };
-        Ok(r)
+        Err(Error::Other(
+            format!("Expected {N} {basename} but got {actual}").into(),
+        ))
     }
 }
 
@@ -426,7 +404,7 @@ impl ImageProxy {
         };
 
         // Verify semantic version
-        let protover: String = r.impl_request("Initialize", [(); 0]).await?.0;
+        let (protover, [], []): (String, _, _) = r.impl_request("Initialize", [(); 0]).await?;
         tracing::debug!("Remote protocol version: {protover}");
         let protover = semver::Version::parse(protover.as_str())?;
         // Previously we had a feature to opt-in to requiring newer versions using `if cfg!()`.
@@ -442,10 +420,14 @@ impl ImageProxy {
         Ok(r)
     }
 
-    async fn impl_request_raw<T: serde::de::DeserializeOwned + Send + 'static>(
+    async fn impl_request_raw<
+        T: serde::de::DeserializeOwned + Send + 'static,
+        const N: usize,
+        const M: usize,
+    >(
         sockfd: Arc<Mutex<OwnedFd>>,
         req: Request,
-    ) -> Result<(T, Option<FileDescriptors>)> {
+    ) -> Result<(T, [OwnedFd; N], [PipeId; M])> {
         tracing::trace!("sending request {}", req.method.as_str());
         // TODO: Investigate https://crates.io/crates/uds for SOCK_SEQPACKET tokio
         let r = tokio::task::spawn_blocking(move || {
@@ -473,8 +455,7 @@ impl ImageProxy {
                     rustix::net::RecvAncillaryMessage::ScmRights(f) => Some(f),
                     _ => None,
                 })
-                .flatten()
-                .fuse();
+                .flatten();
             let buf = &buf[..nread];
             let reply: Reply = serde_json::from_slice(buf)?;
             if !reply.success {
@@ -483,9 +464,11 @@ impl ImageProxy {
                     error: reply.error.into(),
                 });
             }
-            let fdret = FileDescriptors::new_from_raw_values(fdret, reply.pipeid)?;
-            let reply: T = serde_json::from_value(reply.value)?;
-            Ok((reply, fdret))
+            Ok((
+                serde_json::from_value(reply.value)?,
+                fixed_from_iterable(fdret)?,
+                fixed_from_iterable(PipeId::try_new(reply.pipeid))?,
+            ))
         })
         .await
         .map_err(|e| Error::Other(e.to_string().into()))??;
@@ -494,11 +477,15 @@ impl ImageProxy {
     }
 
     #[instrument(skip(args))]
-    async fn impl_request<R: serde::de::DeserializeOwned + Send + 'static>(
+    async fn impl_request<
+        T: serde::de::DeserializeOwned + Send + 'static,
+        const N: usize,
+        const M: usize,
+    >(
         &self,
         method: &str,
         args: impl IntoIterator<Item = impl Into<serde_json::Value>>,
-    ) -> Result<(R, Option<FileDescriptors>)> {
+    ) -> Result<(T, [OwnedFd; N], [PipeId; M])> {
         let req = Self::impl_request_raw(Arc::clone(&self.sockfd), Request::new(method, args));
         let mut childwait = self.childwait.lock().await;
         tokio::select! {
@@ -512,26 +499,23 @@ impl ImageProxy {
     }
 
     #[instrument]
-    async fn finish_pipe(&self, pipeid: NonZeroU32) -> Result<()> {
+    async fn finish_pipe(&self, pipeid: PipeId) -> Result<()> {
         tracing::debug!("closing pipe");
-        let (r, fd) = self.impl_request("FinishPipe", [pipeid.get()]).await?;
-        if fd.is_some() {
-            return Err(Error::Other("Unexpected fd in finish_pipe reply".into()));
-        }
+        let (r, [], []) = self.impl_request("FinishPipe", [pipeid.0.get()]).await?;
         Ok(r)
     }
 
     #[instrument]
     pub async fn open_image(&self, imgref: &str) -> Result<OpenedImage> {
         tracing::debug!("opening image");
-        let (imgid, _) = self.impl_request("OpenImage", [imgref]).await?;
+        let (imgid, [], []) = self.impl_request("OpenImage", [imgref]).await?;
         Ok(OpenedImage(imgid))
     }
 
     #[instrument]
     pub async fn open_image_optional(&self, imgref: &str) -> Result<Option<OpenedImage>> {
         tracing::debug!("opening image");
-        let (imgid, _) = self.impl_request("OpenImageOptional", [imgref]).await?;
+        let (imgid, [], []) = self.impl_request("OpenImageOptional", [imgref]).await?;
         if imgid == 0 {
             Ok(None)
         } else {
@@ -542,15 +526,11 @@ impl ImageProxy {
     #[instrument]
     pub async fn close_image(&self, img: &OpenedImage) -> Result<()> {
         tracing::debug!("closing image");
-        let (r, _) = self.impl_request("CloseImage", [img.0]).await?;
+        let (r, [], []) = self.impl_request("CloseImage", [img.0]).await?;
         Ok(r)
     }
 
-    async fn read_all_fd(&self, fd: Option<FileDescriptors>) -> Result<Vec<u8>> {
-        let fd = fd.ok_or_else(|| Error::Other("Missing fd from reply".into()))?;
-        let FileDescriptors::FinishPipe { pipeid, datafd } = fd else {
-            return Err(Error::Other("got dualfds, expecting FinishPipe fd".into()));
-        };
+    async fn read_all_fd(&self, datafd: OwnedFd, pipeid: PipeId) -> Result<Vec<u8>> {
         let fd = tokio::fs::File::from_std(std::fs::File::from(datafd));
         let mut fd = tokio::io::BufReader::new(fd);
         let mut r = Vec::new();
@@ -565,8 +545,8 @@ impl ImageProxy {
     /// The original digest of the unconverted manifest is also returned.
     /// For more information on OCI manifests, see <https://github.com/opencontainers/image-spec/blob/main/manifest.md>
     pub async fn fetch_manifest_raw_oci(&self, img: &OpenedImage) -> Result<(String, Vec<u8>)> {
-        let (digest, fd) = self.impl_request("GetManifest", [img.0]).await?;
-        Ok((digest, self.read_all_fd(fd).await?))
+        let (digest, [datafd], [pipeid]) = self.impl_request("GetManifest", [img.0]).await?;
+        Ok((digest, self.read_all_fd(datafd, pipeid).await?))
     }
 
     /// Fetch the manifest.
@@ -583,8 +563,8 @@ impl ImageProxy {
     /// Fetch the config.
     /// For more information on OCI config, see <https://github.com/opencontainers/image-spec/blob/main/config.md>
     pub async fn fetch_config_raw(&self, img: &OpenedImage) -> Result<Vec<u8>> {
-        let ((), fd) = self.impl_request("GetFullConfig", [img.0]).await?;
-        self.read_all_fd(fd).await
+        let ((), [datafd], [pipeid]) = self.impl_request("GetFullConfig", [img.0]).await?;
+        self.read_all_fd(datafd, pipeid).await
     }
 
     /// Fetch the config.
@@ -621,12 +601,8 @@ impl ImageProxy {
         tracing::debug!("fetching blob");
         let args: Vec<serde_json::Value> =
             vec![img.0.into(), digest.to_string().into(), size.into()];
-        let (bloblen, fd) = self.impl_request("GetBlob", args).await?;
+        let (bloblen, [datafd], [pipeid]) = self.impl_request("GetBlob", args).await?;
         let _: u64 = bloblen;
-        let fd = fd.ok_or_else(|| Error::Other("Missing fd from reply".into()))?;
-        let FileDescriptors::FinishPipe { pipeid, datafd } = fd else {
-            return Err(Error::Other("got dualfds, expecting FinishPipe fd".into()));
-        };
         let fd = tokio::fs::File::from_std(std::fs::File::from(datafd));
         let fd = tokio::io::BufReader::new(fd);
         let finish = Box::pin(self.finish_pipe(pipeid));
@@ -674,11 +650,7 @@ impl ImageProxy {
     )> {
         tracing::debug!("fetching blob");
         let args: Vec<serde_json::Value> = vec![img.0.into(), digest.to_string().into()];
-        let (bloblen, fd) = self.impl_request("GetRawBlob", args).await?;
-        let fd = fd.ok_or_else(|| Error::new_other("Missing fd from reply"))?;
-        let FileDescriptors::DualFds { datafd, errfd } = fd else {
-            return Err(Error::Other("got single fd, expecting dual fds".into()));
-        };
+        let (bloblen, [datafd, errfd], []) = self.impl_request("GetRawBlob", args).await?;
         let fd = tokio::fs::File::from_std(std::fs::File::from(datafd));
         let err = Self::read_blob_error(errfd).boxed();
         Ok((bloblen, fd, err))
@@ -706,15 +678,14 @@ impl ImageProxy {
     ) -> Result<Option<Vec<ConvertedLayerInfo>>> {
         tracing::debug!("Getting layer info");
         if layer_info_piped_proto_version().matches(&self.protover) {
-            let ((), fd) = self.impl_request("GetLayerInfoPiped", [img.0]).await?;
-            let buf = self.read_all_fd(fd).await?;
+            let ((), [datafd], [pipeid]) = self.impl_request("GetLayerInfoPiped", [img.0]).await?;
+            let buf = self.read_all_fd(datafd, pipeid).await?;
             return Ok(Some(serde_json::from_slice(&buf)?));
         }
         if !layer_info_proto_version().matches(&self.protover) {
             return Ok(None);
         }
-        let reply = self.impl_request("GetLayerInfo", [img.0]).await?;
-        let layers: Vec<ConvertedLayerInfo> = reply.0;
+        let (layers, [], []) = self.impl_request("GetLayerInfo", [img.0]).await?;
         Ok(Some(layers))
     }
 
@@ -748,7 +719,6 @@ impl ImageProxy {
 #[cfg(test)]
 mod tests {
     use std::io::{BufWriter, Seek, Write};
-    use std::num::NonZeroU32;
     use std::os::fd::{AsRawFd, OwnedFd};
 
     use super::*;
@@ -923,33 +893,31 @@ mod tests {
         memfd_create(c"test-fd", MemfdFlags::CLOEXEC).unwrap()
     }
 
+    fn fds_and_pipeid<const N: usize, const M: usize>(
+        fds: impl IntoIterator<IntoIter: FusedIterator, Item = OwnedFd>,
+        pipeid: u32,
+    ) -> Result<([OwnedFd; N], [PipeId; M])> {
+        Ok((
+            fixed_from_iterable(fds)?,
+            fixed_from_iterable(PipeId::try_new(pipeid))?,
+        ))
+    }
+
     #[test]
     fn test_new_from_raw_values_no_fds_no_pipeid() {
-        let fds: Vec<OwnedFd> = vec![];
-        let result = FileDescriptors::new_from_raw_values(fds.into_iter(), 0);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        let ([], []) = fds_and_pipeid([], 0).unwrap();
     }
 
     #[test]
     fn test_new_from_raw_values_finish_pipe() {
         let datafd = create_dummy_fd();
-        // Keep a raw fd to compare later, as into_iter consumes datafd
+        // Keep a raw fd to compare later, as fds_and_pipeid consumes datafd
         let raw_datafd_val = datafd.as_raw_fd();
         let fds = vec![datafd];
-        let pipeid = NonZeroU32::new(1).unwrap();
-        let result = FileDescriptors::new_from_raw_values(fds.into_iter(), pipeid.get());
-        assert!(result.is_ok());
-        match result.unwrap() {
-            Some(FileDescriptors::FinishPipe {
-                pipeid: res_pipeid,
-                datafd: res_datafd,
-            }) => {
-                assert_eq!(res_pipeid, pipeid);
-                assert_eq!(res_datafd.as_raw_fd(), raw_datafd_val);
-            }
-            _ => panic!("Expected FinishPipe variant"),
-        }
+        let pipeid = PipeId::try_new(1).unwrap();
+        let ([res_datafd], [res_pipeid]) = fds_and_pipeid(fds, pipeid.0.get()).unwrap();
+        assert_eq!(res_pipeid, pipeid);
+        assert_eq!(res_datafd.as_raw_fd(), raw_datafd_val);
     }
 
     #[test]
@@ -959,78 +927,56 @@ mod tests {
         let raw_datafd_val = datafd.as_raw_fd();
         let raw_errfd_val = errfd.as_raw_fd();
         let fds = vec![datafd, errfd];
-        let result = FileDescriptors::new_from_raw_values(fds.into_iter(), 0);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            Some(FileDescriptors::DualFds {
-                datafd: res_datafd,
-                errfd: res_errfd,
-            }) => {
-                assert_eq!(
-                    rustix::fd::AsFd::as_fd(&res_datafd).as_raw_fd(),
-                    raw_datafd_val
-                );
-                assert_eq!(
-                    rustix::fd::AsFd::as_fd(&res_errfd).as_raw_fd(),
-                    raw_errfd_val
-                );
-            }
-            _ => panic!("Expected DualFds variant"),
-        }
+        let ([res_datafd, res_errfd], []) = fds_and_pipeid(fds, 0).unwrap();
+        assert_eq!(res_datafd.as_raw_fd(), raw_datafd_val);
+        assert_eq!(res_errfd.as_raw_fd(), raw_errfd_val);
     }
 
     #[test]
     fn test_new_from_raw_values_error_too_many_fds() {
         let fds = vec![create_dummy_fd(), create_dummy_fd(), create_dummy_fd()];
-        let result = FileDescriptors::new_from_raw_values(fds.into_iter(), 0);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            Error::Other(msg) => assert_eq!(msg.as_ref(), "got more than two file descriptors"),
-            _ => panic!("Expected Other error variant"),
+        match fds_and_pipeid(fds, 0) {
+            Ok(([datafd, errfd], [])) => unreachable!("{datafd:?} {errfd:?}"),
+            Err(Error::Other(msg)) => {
+                assert_eq!(msg.as_ref(), "Expected 2 OwnedFd but got 3")
+            }
+            Err(other) => unreachable!("{other}"),
         }
     }
 
     #[test]
     fn test_new_from_raw_values_error_fd_with_zero_pipeid() {
         let fds = vec![create_dummy_fd()];
-        let result = FileDescriptors::new_from_raw_values(fds.into_iter(), 0);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            Error::Other(msg) => assert_eq!(msg.as_ref(), "got fd with zero pipeid"),
-            _ => panic!("Expected Other error variant"),
+        match fds_and_pipeid(fds, 0) {
+            Ok(([datafd], [pipeid])) => unreachable!("{datafd:?} {pipeid:?}"),
+            Err(Error::Other(msg)) => {
+                assert_eq!(msg.as_ref(), "Expected 1 PipeId but got 0")
+            }
+            Err(other) => unreachable!("{other}"),
         }
-    }
-
-    #[test]
-    fn test_new_from_raw_values_error_errfd_no_datafd() {
-        // This case is tricky because the logic first checks for first_fd.
-        // To simulate this, we'd need an iterator that returns None then Some.
-        // The current implementation path makes this specific error message hard to hit directly
-        // if fds is a simple Vec. The `(None, Some(_), _)` pattern in `match`
-        // is more of a safeguard for potential iterator behaviors.
     }
 
     #[test]
     fn test_new_from_raw_values_error_pipeid_with_both_fds() {
         let fds = vec![create_dummy_fd(), create_dummy_fd()];
-        let result = FileDescriptors::new_from_raw_values(fds.into_iter(), 1);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            Error::Other(msg) => {
-                assert_eq!(msg.as_ref(), "got pipeid 1 with both datafd and errfd")
+        match fds_and_pipeid(fds, 1) {
+            Ok(([datafd, errfd], [])) => unreachable!("{datafd:?} {errfd:?}"),
+            Err(Error::Other(msg)) => {
+                assert_eq!(msg.as_ref(), "Expected 0 PipeId but got 1")
             }
-            _ => panic!("Expected Other error variant"),
+            Err(other) => unreachable!("{other}"),
         }
     }
 
     #[test]
     fn test_new_from_raw_values_error_no_fd_with_pipeid() {
         let fds: Vec<OwnedFd> = vec![];
-        let result = FileDescriptors::new_from_raw_values(fds.into_iter(), 1);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            Error::Other(msg) => assert_eq!(msg.as_ref(), "got no fd with pipeid 1"),
-            _ => panic!("Expected Other error variant"),
+        match fds_and_pipeid(fds, 1) {
+            Ok(([datafd], [pipeid])) => unreachable!("{datafd:?} {pipeid:?}"),
+            Err(Error::Other(msg)) => {
+                assert_eq!(msg.as_ref(), "Expected 1 OwnedFd but got 0")
+            }
+            Err(other) => unreachable!("{other}"),
         }
     }
 }
