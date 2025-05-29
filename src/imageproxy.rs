@@ -426,7 +426,7 @@ impl ImageProxy {
         };
 
         // Verify semantic version
-        let protover = r.impl_request::<String>("Initialize", [(); 0]).await?.0;
+        let protover: String = r.impl_request("Initialize", [(); 0]).await?.0;
         tracing::debug!("Remote protocol version: {protover}");
         let protover = semver::Version::parse(protover.as_str())?;
         // Previously we had a feature to opt-in to requiring newer versions using `if cfg!()`.
@@ -524,18 +524,14 @@ impl ImageProxy {
     #[instrument]
     pub async fn open_image(&self, imgref: &str) -> Result<OpenedImage> {
         tracing::debug!("opening image");
-        let (imgid, _) = self
-            .impl_request::<u32>("OpenImage", [imgref])
-            .await?;
+        let (imgid, _) = self.impl_request("OpenImage", [imgref]).await?;
         Ok(OpenedImage(imgid))
     }
 
     #[instrument]
     pub async fn open_image_optional(&self, imgref: &str) -> Result<Option<OpenedImage>> {
         tracing::debug!("opening image");
-        let (imgid, _) = self
-            .impl_request::<u32>("OpenImageOptional", [imgref])
-            .await?;
+        let (imgid, _) = self.impl_request("OpenImageOptional", [imgref]).await?;
         if imgid == 0 {
             Ok(None)
         } else {
@@ -587,9 +583,7 @@ impl ImageProxy {
     /// Fetch the config.
     /// For more information on OCI config, see <https://github.com/opencontainers/image-spec/blob/main/config.md>
     pub async fn fetch_config_raw(&self, img: &OpenedImage) -> Result<Vec<u8>> {
-        let (_, fd) = self
-            .impl_request::<()>("GetFullConfig", [img.0])
-            .await?;
+        let ((), fd) = self.impl_request("GetFullConfig", [img.0]).await?;
         self.read_all_fd(fd).await
     }
 
@@ -627,7 +621,8 @@ impl ImageProxy {
         tracing::debug!("fetching blob");
         let args: Vec<serde_json::Value> =
             vec![img.0.into(), digest.to_string().into(), size.into()];
-        let (_bloblen, fd) = self.impl_request::<i64>("GetBlob", args).await?;
+        let (bloblen, fd) = self.impl_request("GetBlob", args).await?;
+        let _: u64 = bloblen;
         let fd = fd.ok_or_else(|| Error::Other("Missing fd from reply".into()))?;
         let FileDescriptors::FinishPipe { pipeid, datafd } = fd else {
             return Err(Error::Other("got dualfds, expecting FinishPipe fd".into()));
@@ -679,7 +674,7 @@ impl ImageProxy {
     )> {
         tracing::debug!("fetching blob");
         let args: Vec<serde_json::Value> = vec![img.0.into(), digest.to_string().into()];
-        let (bloblen, fd) = self.impl_request::<u64>("GetRawBlob", args).await?;
+        let (bloblen, fd) = self.impl_request("GetRawBlob", args).await?;
         let fd = fd.ok_or_else(|| Error::new_other("Missing fd from reply"))?;
         let FileDescriptors::DualFds { datafd, errfd } = fd else {
             return Err(Error::Other("got single fd, expecting dual fds".into()));
@@ -711,9 +706,7 @@ impl ImageProxy {
     ) -> Result<Option<Vec<ConvertedLayerInfo>>> {
         tracing::debug!("Getting layer info");
         if layer_info_piped_proto_version().matches(&self.protover) {
-            let (_, fd) = self
-                .impl_request::<()>("GetLayerInfoPiped", [img.0])
-                .await?;
+            let ((), fd) = self.impl_request("GetLayerInfoPiped", [img.0]).await?;
             let buf = self.read_all_fd(fd).await?;
             return Ok(Some(serde_json::from_slice(&buf)?));
         }
