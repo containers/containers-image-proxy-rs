@@ -444,7 +444,7 @@ impl ImageProxy {
         };
 
         // Verify semantic version
-        let (protover, _): (String, ()) = r.impl_request("Initialize", [(); 0]).await?;
+        let protover: String = r.impl_request("Initialize", [(); 0]).await?;
         tracing::debug!("Remote protocol version: {protover}");
         let protover = semver::Version::parse(protover.as_str())?;
         // Previously we had a feature to opt-in to requiring newer versions using `if cfg!()`.
@@ -460,6 +460,7 @@ impl ImageProxy {
         Ok(r)
     }
 
+    /// Create and send a request. Should only be used by impl_request.
     async fn impl_request_raw<T: serde::de::DeserializeOwned + Send + 'static, F: FromReplyFds>(
         sockfd: Arc<Mutex<OwnedFd>>,
         req: Request,
@@ -509,8 +510,13 @@ impl ImageProxy {
         Ok(r)
     }
 
+    /// Create a request that may return file descriptors, and also check for an unexpected
+    /// termination of the child process.
     #[instrument(skip(args))]
-    async fn impl_request<T: serde::de::DeserializeOwned + Send + 'static, F: FromReplyFds>(
+    async fn impl_request_with_fds<
+        T: serde::de::DeserializeOwned + Send + 'static,
+        F: FromReplyFds,
+    >(
         &self,
         method: &str,
         args: impl IntoIterator<Item = impl Into<serde_json::Value>>,
@@ -527,24 +533,36 @@ impl ImageProxy {
         }
     }
 
+    /// A synchronous invocation which does not return any file descriptors.
+    async fn impl_request<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        method: &str,
+        args: impl IntoIterator<Item = impl Into<serde_json::Value>>,
+    ) -> Result<T> {
+        let (r, ()) = self.impl_request_with_fds(method, args).await?;
+        Ok(r)
+    }
+
     #[instrument]
     async fn finish_pipe(&self, pipeid: PipeId) -> Result<()> {
         tracing::debug!("closing pipe");
-        let (r, ()) = self.impl_request("FinishPipe", [pipeid.0.get()]).await?;
+        let (r, ()) = self
+            .impl_request_with_fds("FinishPipe", [pipeid.0.get()])
+            .await?;
         Ok(r)
     }
 
     #[instrument]
     pub async fn open_image(&self, imgref: &str) -> Result<OpenedImage> {
         tracing::debug!("opening image");
-        let (imgid, ()) = self.impl_request("OpenImage", [imgref]).await?;
+        let imgid = self.impl_request("OpenImage", [imgref]).await?;
         Ok(OpenedImage(imgid))
     }
 
     #[instrument]
     pub async fn open_image_optional(&self, imgref: &str) -> Result<Option<OpenedImage>> {
         tracing::debug!("opening image");
-        let (imgid, ()) = self.impl_request("OpenImageOptional", [imgref]).await?;
+        let imgid = self.impl_request("OpenImageOptional", [imgref]).await?;
         if imgid == 0 {
             Ok(None)
         } else {
@@ -554,9 +572,7 @@ impl ImageProxy {
 
     #[instrument]
     pub async fn close_image(&self, img: &OpenedImage) -> Result<()> {
-        tracing::debug!("closing image");
-        let (r, ()) = self.impl_request("CloseImage", [img.0]).await?;
-        Ok(r)
+        self.impl_request("CloseImage", [img.0]).await
     }
 
     async fn read_finish_pipe(&self, pipe: FinishPipe) -> Result<Vec<u8>> {
@@ -574,7 +590,7 @@ impl ImageProxy {
     /// The original digest of the unconverted manifest is also returned.
     /// For more information on OCI manifests, see <https://github.com/opencontainers/image-spec/blob/main/manifest.md>
     pub async fn fetch_manifest_raw_oci(&self, img: &OpenedImage) -> Result<(String, Vec<u8>)> {
-        let (digest, pipefd) = self.impl_request("GetManifest", [img.0]).await?;
+        let (digest, pipefd) = self.impl_request_with_fds("GetManifest", [img.0]).await?;
         Ok((digest, self.read_finish_pipe(pipefd).await?))
     }
 
@@ -592,7 +608,7 @@ impl ImageProxy {
     /// Fetch the config.
     /// For more information on OCI config, see <https://github.com/opencontainers/image-spec/blob/main/config.md>
     pub async fn fetch_config_raw(&self, img: &OpenedImage) -> Result<Vec<u8>> {
-        let ((), pipe) = self.impl_request("GetFullConfig", [img.0]).await?;
+        let ((), pipe) = self.impl_request_with_fds("GetFullConfig", [img.0]).await?;
         self.read_finish_pipe(pipe).await
     }
 
@@ -630,7 +646,8 @@ impl ImageProxy {
         tracing::debug!("fetching blob");
         let args: Vec<serde_json::Value> =
             vec![img.0.into(), digest.to_string().into(), size.into()];
-        let (bloblen, pipe): (u64, FinishPipe) = self.impl_request("GetBlob", args).await?;
+        let (bloblen, pipe): (u64, FinishPipe) =
+            self.impl_request_with_fds("GetBlob", args).await?;
         let _: u64 = bloblen;
         let fd = tokio::fs::File::from_std(std::fs::File::from(pipe.datafd));
         let fd = tokio::io::BufReader::new(fd);
@@ -679,7 +696,7 @@ impl ImageProxy {
     )> {
         tracing::debug!("fetching blob");
         let args: Vec<serde_json::Value> = vec![img.0.into(), digest.to_string().into()];
-        let (bloblen, fds): (u64, DualFds) = self.impl_request("GetRawBlob", args).await?;
+        let (bloblen, fds): (u64, DualFds) = self.impl_request_with_fds("GetRawBlob", args).await?;
         let fd = tokio::fs::File::from_std(std::fs::File::from(fds.datafd));
         let err = Self::read_blob_error(fds.errfd).boxed();
         Ok((bloblen, fd, err))
@@ -707,14 +724,16 @@ impl ImageProxy {
     ) -> Result<Option<Vec<ConvertedLayerInfo>>> {
         tracing::debug!("Getting layer info");
         if layer_info_piped_proto_version().matches(&self.protover) {
-            let ((), pipe) = self.impl_request("GetLayerInfoPiped", [img.0]).await?;
+            let ((), pipe) = self
+                .impl_request_with_fds("GetLayerInfoPiped", [img.0])
+                .await?;
             let buf = self.read_finish_pipe(pipe).await?;
             return Ok(Some(serde_json::from_slice(&buf)?));
         }
         if !layer_info_proto_version().matches(&self.protover) {
             return Ok(None);
         }
-        let (layers, ()) = self.impl_request("GetLayerInfo", [img.0]).await?;
+        let layers = self.impl_request("GetLayerInfo", [img.0]).await?;
         Ok(Some(layers))
     }
 
