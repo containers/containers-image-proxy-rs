@@ -7,6 +7,7 @@
 use cap_std_ext::prelude::CapStdExtCommandExt;
 use cap_std_ext::{cap_std, cap_tempfile};
 use futures_util::{Future, FutureExt};
+use itertools::Itertools;
 use oci_spec::image::{Descriptor, Digest};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -382,39 +383,27 @@ impl FromReplyFds for () {
 /// A FinishPipe instance
 impl FromReplyFds for FinishPipe {
     fn from_reply(fds: impl IntoIterator<Item = OwnedFd>, pipeid: u32) -> Result<Self> {
-        let mut fds = fds.into_iter();
-        let Some(first_fd) = fds.next() else {
-            return Err(Error::Other("Expected fd for FinishPipe".into()));
-        };
-        if fds.next().is_some() {
-            return Err(Error::Other("More than one fd for FinishPipe".into()));
-        }
         let Some(pipeid) = PipeId::try_new(pipeid) else {
             return Err(Error::Other("Expected pipeid for FinishPipe".into()));
         };
-        Ok(Self {
-            pipeid,
-            datafd: first_fd,
-        })
+        let datafd = fds
+            .into_iter()
+            .exactly_one()
+            .map_err(|_| Error::Other("Expected exactly one fd for FinishPipe".into()))?;
+        Ok(Self { pipeid, datafd })
     }
 }
 
 /// A DualFds instance
 impl FromReplyFds for DualFds {
     fn from_reply(fds: impl IntoIterator<Item = OwnedFd>, pipeid: u32) -> Result<Self> {
-        let mut fds = fds.into_iter();
-        let Some(datafd) = fds.next() else {
-            return Err(Error::Other("Expected data fd for DualFds".into()));
-        };
-        let Some(errfd) = fds.next() else {
-            return Err(Error::Other("Expected err fd for DualFds".into()));
-        };
-        if fds.next().is_some() {
-            return Err(Error::Other("More than two fds for DualFds".into()));
-        }
         if pipeid != 0 {
             return Err(Error::Other("Unexpected pipeid with DualFds".into()));
         }
+        let [datafd, errfd] = fds
+            .into_iter()
+            .collect_array()
+            .ok_or_else(|| Error::Other("Expected two fds for DualFds".into()))?;
         Ok(Self { datafd, errfd })
     }
 }
@@ -962,7 +951,7 @@ mod tests {
         match DualFds::from_reply(fds, 0) {
             Ok(v) => unreachable!("{v:?}"),
             Err(Error::Other(msg)) => {
-                assert_eq!(msg.as_ref(), "More than two fds for DualFds")
+                assert_eq!(msg.as_ref(), "Expected two fds for DualFds")
             }
             Err(other) => unreachable!("{other}"),
         }
@@ -998,7 +987,7 @@ mod tests {
         match FinishPipe::from_reply(fds, 1) {
             Ok(v) => unreachable!("{v:?}"),
             Err(Error::Other(msg)) => {
-                assert_eq!(msg.as_ref(), "Expected fd for FinishPipe")
+                assert_eq!(msg.as_ref(), "Expected exactly one fd for FinishPipe")
             }
             Err(other) => unreachable!("{other}"),
         }
