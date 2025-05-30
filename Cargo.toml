@@ -23,6 +23,7 @@ tokio = { features = ["fs", "io-util", "macros", "process", "rt", "sync"], versi
 tracing = "0.1"
 # We support versions 2, 3 and 4
 cap-std-ext = ">= 2.0, <= 4.0"
+itertools = "0.14.0"
 
 [dev-dependencies]
 anyhow = "1.0"

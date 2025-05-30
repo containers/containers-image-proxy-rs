@@ -6,10 +6,13 @@
 
 use cap_std_ext::prelude::CapStdExtCommandExt;
 use cap_std_ext::{cap_std, cap_tempfile};
-use futures_util::Future;
+use futures_util::{Future, FutureExt};
+use itertools::Itertools;
 use oci_spec::image::{Descriptor, Digest};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
+use std::iter::FusedIterator;
+use std::num::NonZeroU32;
 use std::ops::Range;
 use std::os::fd::OwnedFd;
 use std::os::unix::prelude::CommandExt;
@@ -62,6 +65,18 @@ impl Error {
     pub(crate) fn new_other(e: impl Into<Box<str>>) -> Self {
         Self::Other(e.into())
     }
+}
+
+/// Errors returned by get_raw_blob
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum GetBlobError {
+    /// A client may reasonably retry on this type of error.
+    #[error("retryable error")]
+    Retryable(Box<str>),
+    #[error("error")]
+    /// An unknown other error
+    Other(Box<str>),
 }
 
 impl From<rustix::io::Errno> for Error {
@@ -159,6 +174,15 @@ impl std::fmt::Debug for ImageProxy {
 /// Opaque identifier for an image
 #[derive(Debug, PartialEq, Eq)]
 pub struct OpenedImage(u32);
+
+#[derive(Debug, PartialEq, Eq)]
+struct PipeId(NonZeroU32);
+
+impl PipeId {
+    fn try_new(pipeid: u32) -> Option<Self> {
+        Some(Self(NonZeroU32::new(pipeid)?))
+    }
+}
 
 /// Configuration for the proxy.
 #[derive(Debug, Default)]
@@ -318,6 +342,72 @@ pub struct ConvertedLayerInfo {
     pub media_type: oci_spec::image::MediaType,
 }
 
+/// A single fd; requires invoking FinishPipe
+#[derive(Debug)]
+struct FinishPipe {
+    pipeid: PipeId,
+    datafd: OwnedFd,
+}
+
+/// There is a data FD and an error FD. The error FD will be JSON.
+#[derive(Debug)]
+struct DualFds {
+    datafd: OwnedFd,
+    errfd: OwnedFd,
+}
+
+/// Helper trait for parsing the pipeid and/or file descriptors of a reply
+trait FromReplyFds: Send + 'static
+where
+    Self: Sized,
+{
+    fn from_reply(
+        iterable: impl IntoIterator<IntoIter: FusedIterator, Item = OwnedFd>,
+        pipeid: u32,
+    ) -> Result<Self>;
+}
+
+/// No file descriptors or pipeid expected
+impl FromReplyFds for () {
+    fn from_reply(fds: impl IntoIterator<Item = OwnedFd>, pipeid: u32) -> Result<Self> {
+        if fds.into_iter().next().is_some() {
+            return Err(Error::Other("expected no fds".into()));
+        }
+        if pipeid != 0 {
+            return Err(Error::Other("unexpected pipeid".into()));
+        }
+        Ok(())
+    }
+}
+
+/// A FinishPipe instance
+impl FromReplyFds for FinishPipe {
+    fn from_reply(fds: impl IntoIterator<Item = OwnedFd>, pipeid: u32) -> Result<Self> {
+        let Some(pipeid) = PipeId::try_new(pipeid) else {
+            return Err(Error::Other("Expected pipeid for FinishPipe".into()));
+        };
+        let datafd = fds
+            .into_iter()
+            .exactly_one()
+            .map_err(|_| Error::Other("Expected exactly one fd for FinishPipe".into()))?;
+        Ok(Self { pipeid, datafd })
+    }
+}
+
+/// A DualFds instance
+impl FromReplyFds for DualFds {
+    fn from_reply(fds: impl IntoIterator<Item = OwnedFd>, pipeid: u32) -> Result<Self> {
+        if pipeid != 0 {
+            return Err(Error::Other("Unexpected pipeid with DualFds".into()));
+        }
+        let [datafd, errfd] = fds
+            .into_iter()
+            .collect_array()
+            .ok_or_else(|| Error::Other("Expected two fds for DualFds".into()))?;
+        Ok(Self { datafd, errfd })
+    }
+}
+
 impl ImageProxy {
     /// Create an image proxy that fetches the target image, using default configuration.
     pub async fn new() -> Result<Self> {
@@ -354,7 +444,7 @@ impl ImageProxy {
         };
 
         // Verify semantic version
-        let protover = r.impl_request::<String, _, ()>("Initialize", []).await?.0;
+        let protover: String = r.impl_request("Initialize", [(); 0]).await?;
         tracing::debug!("Remote protocol version: {protover}");
         let protover = semver::Version::parse(protover.as_str())?;
         // Previously we had a feature to opt-in to requiring newer versions using `if cfg!()`.
@@ -370,10 +460,11 @@ impl ImageProxy {
         Ok(r)
     }
 
-    async fn impl_request_raw<T: serde::de::DeserializeOwned + Send + 'static>(
+    /// Create and send a request. Should only be used by impl_request.
+    async fn impl_request_raw<T: serde::de::DeserializeOwned + Send + 'static, F: FromReplyFds>(
         sockfd: Arc<Mutex<OwnedFd>>,
         req: Request,
-    ) -> Result<(T, Option<(OwnedFd, u32)>)> {
+    ) -> Result<(T, F)> {
         tracing::trace!("sending request {}", req.method.as_str());
         // TODO: Investigate https://crates.io/crates/uds for SOCK_SEQPACKET tokio
         let r = tokio::task::spawn_blocking(move || {
@@ -401,8 +492,7 @@ impl ImageProxy {
                     rustix::net::RecvAncillaryMessage::ScmRights(f) => Some(f),
                     _ => None,
                 })
-                .flatten()
-                .next();
+                .flatten();
             let buf = &buf[..nread];
             let reply: Reply = serde_json::from_slice(buf)?;
             if !reply.success {
@@ -411,22 +501,8 @@ impl ImageProxy {
                     error: reply.error.into(),
                 });
             }
-            let fdret = match (fdret, reply.pipeid) {
-                (Some(fd), n) => {
-                    if n == 0 {
-                        return Err(Error::Other("got fd but no pipeid".into()));
-                    }
-                    Some((fd, n))
-                }
-                (None, n) => {
-                    if n != 0 {
-                        return Err(Error::Other(format!("got no fd with pipeid {}", n).into()));
-                    }
-                    None
-                }
-            };
-            let reply = serde_json::from_value(reply.value)?;
-            Ok((reply, fdret))
+            let fds = FromReplyFds::from_reply(fdret, reply.pipeid)?;
+            Ok((serde_json::from_value(reply.value)?, fds))
         })
         .await
         .map_err(|e| Error::Other(e.to_string().into()))??;
@@ -434,16 +510,17 @@ impl ImageProxy {
         Ok(r)
     }
 
+    /// Create a request that may return file descriptors, and also check for an unexpected
+    /// termination of the child process.
     #[instrument(skip(args))]
-    async fn impl_request<R: serde::de::DeserializeOwned + Send + 'static, T, I>(
+    async fn impl_request_with_fds<
+        T: serde::de::DeserializeOwned + Send + 'static,
+        F: FromReplyFds,
+    >(
         &self,
         method: &str,
-        args: T,
-    ) -> Result<(R, Option<(OwnedFd, u32)>)>
-    where
-        T: IntoIterator<Item = I>,
-        I: Into<serde_json::Value>,
-    {
+        args: impl IntoIterator<Item = impl Into<serde_json::Value>>,
+    ) -> Result<(T, F)> {
         let req = Self::impl_request_raw(Arc::clone(&self.sockfd), Request::new(method, args));
         let mut childwait = self.childwait.lock().await;
         tokio::select! {
@@ -456,31 +533,36 @@ impl ImageProxy {
         }
     }
 
+    /// A synchronous invocation which does not return any file descriptors.
+    async fn impl_request<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        method: &str,
+        args: impl IntoIterator<Item = impl Into<serde_json::Value>>,
+    ) -> Result<T> {
+        let (r, ()) = self.impl_request_with_fds(method, args).await?;
+        Ok(r)
+    }
+
     #[instrument]
-    async fn finish_pipe(&self, pipeid: u32) -> Result<()> {
+    async fn finish_pipe(&self, pipeid: PipeId) -> Result<()> {
         tracing::debug!("closing pipe");
-        let (r, fd) = self.impl_request("FinishPipe", [pipeid]).await?;
-        if fd.is_some() {
-            return Err(Error::Other("Unexpected fd in finish_pipe reply".into()));
-        }
+        let (r, ()) = self
+            .impl_request_with_fds("FinishPipe", [pipeid.0.get()])
+            .await?;
         Ok(r)
     }
 
     #[instrument]
     pub async fn open_image(&self, imgref: &str) -> Result<OpenedImage> {
         tracing::debug!("opening image");
-        let (imgid, _) = self
-            .impl_request::<u32, _, _>("OpenImage", [imgref])
-            .await?;
+        let imgid = self.impl_request("OpenImage", [imgref]).await?;
         Ok(OpenedImage(imgid))
     }
 
     #[instrument]
     pub async fn open_image_optional(&self, imgref: &str) -> Result<Option<OpenedImage>> {
         tracing::debug!("opening image");
-        let (imgid, _) = self
-            .impl_request::<u32, _, _>("OpenImageOptional", [imgref])
-            .await?;
+        let imgid = self.impl_request("OpenImageOptional", [imgref]).await?;
         if imgid == 0 {
             Ok(None)
         } else {
@@ -490,18 +572,15 @@ impl ImageProxy {
 
     #[instrument]
     pub async fn close_image(&self, img: &OpenedImage) -> Result<()> {
-        tracing::debug!("closing image");
-        let (r, _) = self.impl_request("CloseImage", [img.0]).await?;
-        Ok(r)
+        self.impl_request("CloseImage", [img.0]).await
     }
 
-    async fn read_all_fd(&self, fd: Option<(OwnedFd, u32)>) -> Result<Vec<u8>> {
-        let (fd, pipeid) = fd.ok_or_else(|| Error::Other("Missing fd from reply".into()))?;
-        let fd = tokio::fs::File::from_std(std::fs::File::from(fd));
+    async fn read_finish_pipe(&self, pipe: FinishPipe) -> Result<Vec<u8>> {
+        let fd = tokio::fs::File::from_std(std::fs::File::from(pipe.datafd));
         let mut fd = tokio::io::BufReader::new(fd);
         let mut r = Vec::new();
         let reader = fd.read_to_end(&mut r);
-        let (nbytes, finish) = tokio::join!(reader, self.finish_pipe(pipeid));
+        let (nbytes, finish) = tokio::join!(reader, self.finish_pipe(pipe.pipeid));
         finish?;
         assert_eq!(nbytes?, r.len());
         Ok(r)
@@ -511,8 +590,8 @@ impl ImageProxy {
     /// The original digest of the unconverted manifest is also returned.
     /// For more information on OCI manifests, see <https://github.com/opencontainers/image-spec/blob/main/manifest.md>
     pub async fn fetch_manifest_raw_oci(&self, img: &OpenedImage) -> Result<(String, Vec<u8>)> {
-        let (digest, fd) = self.impl_request("GetManifest", [img.0]).await?;
-        Ok((digest, self.read_all_fd(fd).await?))
+        let (digest, pipefd) = self.impl_request_with_fds("GetManifest", [img.0]).await?;
+        Ok((digest, self.read_finish_pipe(pipefd).await?))
     }
 
     /// Fetch the manifest.
@@ -529,10 +608,8 @@ impl ImageProxy {
     /// Fetch the config.
     /// For more information on OCI config, see <https://github.com/opencontainers/image-spec/blob/main/config.md>
     pub async fn fetch_config_raw(&self, img: &OpenedImage) -> Result<Vec<u8>> {
-        let (_, fd) = self
-            .impl_request::<(), _, _>("GetFullConfig", [img.0])
-            .await?;
-        self.read_all_fd(fd).await
+        let ((), pipe) = self.impl_request_with_fds("GetFullConfig", [img.0]).await?;
+        self.read_finish_pipe(pipe).await
     }
 
     /// Fetch the config.
@@ -569,12 +646,60 @@ impl ImageProxy {
         tracing::debug!("fetching blob");
         let args: Vec<serde_json::Value> =
             vec![img.0.into(), digest.to_string().into(), size.into()];
-        let (_bloblen, fd) = self.impl_request::<i64, _, _>("GetBlob", args).await?;
-        let (fd, pipeid) = fd.ok_or_else(|| Error::new_other("Missing fd from reply"))?;
-        let fd = tokio::fs::File::from_std(std::fs::File::from(fd));
+        let (bloblen, pipe): (u64, FinishPipe) =
+            self.impl_request_with_fds("GetBlob", args).await?;
+        let _: u64 = bloblen;
+        let fd = tokio::fs::File::from_std(std::fs::File::from(pipe.datafd));
         let fd = tokio::io::BufReader::new(fd);
-        let finish = Box::pin(self.finish_pipe(pipeid));
+        let finish = Box::pin(self.finish_pipe(pipe.pipeid));
         Ok((fd, finish))
+    }
+
+    async fn read_blob_error(fd: OwnedFd) -> std::result::Result<(), GetBlobError> {
+        let fd = tokio::fs::File::from_std(std::fs::File::from(fd));
+        let mut errfd = tokio::io::BufReader::new(fd);
+        let mut buf = Vec::new();
+        errfd
+            .read_to_end(&mut buf)
+            .await
+            .map_err(|e| GetBlobError::Other(e.to_string().into_boxed_str()))?;
+        if buf.is_empty() {
+            return Ok(());
+        }
+        #[derive(Deserialize)]
+        struct RemoteError {
+            code: String,
+            message: String,
+        }
+        let e: RemoteError = serde_json::from_slice(&buf)
+            .map_err(|e| GetBlobError::Other(e.to_string().into_boxed_str()))?;
+        match e.code.as_str() {
+            // Actually this is OK
+            "EPIPE" => Ok(()),
+            "retryable" => Err(GetBlobError::Retryable(e.message.into_boxed_str())),
+            _ => Err(GetBlobError::Other(e.message.into_boxed_str())),
+        }
+    }
+
+    /// Fetch a blob identified by e.g. `sha256:<digest>`; does not perform
+    /// any verification that the blob matches the digest. The size of the
+    /// blob and a pipe file descriptor are returned.
+    #[instrument]
+    pub async fn get_raw_blob(
+        &self,
+        img: &OpenedImage,
+        digest: &Digest,
+    ) -> Result<(
+        u64,
+        tokio::fs::File,
+        impl Future<Output = std::result::Result<(), GetBlobError>> + Unpin + '_,
+    )> {
+        tracing::debug!("fetching blob");
+        let args: Vec<serde_json::Value> = vec![img.0.into(), digest.to_string().into()];
+        let (bloblen, fds): (u64, DualFds) = self.impl_request_with_fds("GetRawBlob", args).await?;
+        let fd = tokio::fs::File::from_std(std::fs::File::from(fds.datafd));
+        let err = Self::read_blob_error(fds.errfd).boxed();
+        Ok((bloblen, fd, err))
     }
 
     /// Fetch a descriptor. The requested size and digest are verified (by the proxy process).
@@ -599,17 +724,16 @@ impl ImageProxy {
     ) -> Result<Option<Vec<ConvertedLayerInfo>>> {
         tracing::debug!("Getting layer info");
         if layer_info_piped_proto_version().matches(&self.protover) {
-            let (_, fd) = self
-                .impl_request::<(), _, _>("GetLayerInfoPiped", [img.0])
+            let ((), pipe) = self
+                .impl_request_with_fds("GetLayerInfoPiped", [img.0])
                 .await?;
-            let buf = self.read_all_fd(fd).await?;
+            let buf = self.read_finish_pipe(pipe).await?;
             return Ok(Some(serde_json::from_slice(&buf)?));
         }
         if !layer_info_proto_version().matches(&self.protover) {
             return Ok(None);
         }
-        let reply = self.impl_request("GetLayerInfo", [img.0]).await?;
-        let layers: Vec<ConvertedLayerInfo> = reply.0;
+        let layers = self.impl_request("GetLayerInfo", [img.0]).await?;
         Ok(Some(layers))
     }
 
@@ -642,9 +766,12 @@ impl ImageProxy {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Seek, Write};
+    use std::io::{BufWriter, Seek, Write};
+    use std::os::fd::{AsRawFd, OwnedFd};
 
     use super::*;
+    use cap_std_ext::cap_std::fs::Dir;
+    use rustix::fs::{memfd_create, MemfdFlags};
 
     fn validate(c: Command, contains: &[&str], not_contains: &[&str]) {
         // Format via debug, because
@@ -744,5 +871,144 @@ mod tests {
         let opened = OpenedImage(0);
         assert_send_sync(&opened);
         assert_send_sync(opened);
+    }
+
+    fn generate_err_fd(v: serde_json::Value) -> Result<OwnedFd> {
+        let tmp = Dir::open_ambient_dir("/tmp", cap_std::ambient_authority())?;
+        let mut tf = cap_tempfile::TempFile::new_anonymous(&tmp).map(BufWriter::new)?;
+        serde_json::to_writer(&mut tf, &v)?;
+        let mut tf = tf.into_inner().map_err(|e| e.into_error())?;
+        tf.seek(std::io::SeekFrom::Start(0))?;
+        let r = tf.into_std().into();
+        Ok(r)
+    }
+
+    #[tokio::test]
+    async fn test_read_blob_error_retryable() -> Result<()> {
+        let retryable = serde_json::json!({
+            "code": "retryable",
+            "message": "foo",
+        });
+        let retryable = generate_err_fd(retryable)?;
+        let err = ImageProxy::read_blob_error(retryable).boxed();
+        let e = err.await.unwrap_err();
+        match e {
+            GetBlobError::Retryable(s) => assert_eq!(s.as_ref(), "foo"),
+            _ => panic!("Unexpected error {e:?}"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_blob_error_none() -> Result<()> {
+        let tmp = Dir::open_ambient_dir("/tmp", cap_std::ambient_authority())?;
+        let tf = cap_tempfile::TempFile::new_anonymous(&tmp)?.into_std();
+        let err = ImageProxy::read_blob_error(tf.into()).boxed();
+        err.await.unwrap();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_blob_error_other() -> Result<()> {
+        let other = serde_json::json!({
+            "code": "other",
+            "message": "bar",
+        });
+        let other = generate_err_fd(other)?;
+        let err = ImageProxy::read_blob_error(other).boxed();
+        let e = err.await.unwrap_err();
+        match e {
+            GetBlobError::Other(s) => assert_eq!(s.as_ref(), "bar"),
+            _ => panic!("Unexpected error {e:?}"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_read_blob_error_epipe() -> Result<()> {
+        let epipe = serde_json::json!({
+            "code": "EPIPE",
+            "message": "baz",
+        });
+        let epipe = generate_err_fd(epipe)?;
+        let err = ImageProxy::read_blob_error(epipe).boxed();
+        err.await.unwrap();
+        Ok(())
+    }
+
+    // Helper to create a dummy OwnedFd using memfd_create for testing.
+    fn create_dummy_fd() -> OwnedFd {
+        memfd_create(c"test-fd", MemfdFlags::CLOEXEC).unwrap()
+    }
+
+    #[test]
+    fn test_new_from_raw_values_finish_pipe() {
+        let datafd = create_dummy_fd();
+        // Keep a raw fd to compare later, as fds_and_pipeid consumes datafd
+        let raw_datafd_val = datafd.as_raw_fd();
+        let fds = vec![datafd];
+        let v = FinishPipe::from_reply(fds, 1).unwrap();
+        assert_eq!(v.pipeid.0.get(), 1);
+        assert_eq!(v.datafd.as_raw_fd(), raw_datafd_val);
+    }
+
+    #[test]
+    fn test_new_from_raw_values_dual_fds() {
+        let datafd = create_dummy_fd();
+        let errfd = create_dummy_fd();
+        let raw_datafd_val = datafd.as_raw_fd();
+        let raw_errfd_val = errfd.as_raw_fd();
+        let fds = vec![datafd, errfd];
+        let v = DualFds::from_reply(fds, 0).unwrap();
+        assert_eq!(v.datafd.as_raw_fd(), raw_datafd_val);
+        assert_eq!(v.errfd.as_raw_fd(), raw_errfd_val);
+    }
+
+    #[test]
+    fn test_new_from_raw_values_error_too_many_fds() {
+        let fds = vec![create_dummy_fd(), create_dummy_fd(), create_dummy_fd()];
+        match DualFds::from_reply(fds, 0) {
+            Ok(v) => unreachable!("{v:?}"),
+            Err(Error::Other(msg)) => {
+                assert_eq!(msg.as_ref(), "Expected two fds for DualFds")
+            }
+            Err(other) => unreachable!("{other}"),
+        }
+    }
+
+    #[test]
+    fn test_new_from_raw_values_error_fd_with_zero_pipeid() {
+        let fds = vec![create_dummy_fd()];
+        match FinishPipe::from_reply(fds, 0) {
+            Ok(v) => unreachable!("{v:?}"),
+            Err(Error::Other(msg)) => {
+                assert_eq!(msg.as_ref(), "Expected pipeid for FinishPipe")
+            }
+            Err(other) => unreachable!("{other}"),
+        }
+    }
+
+    #[test]
+    fn test_new_from_raw_values_error_pipeid_with_both_fds() {
+        let fds = vec![create_dummy_fd(), create_dummy_fd()];
+        match DualFds::from_reply(fds, 1) {
+            Ok(v) => unreachable!("{v:?}"),
+            Err(Error::Other(msg)) => {
+                assert_eq!(msg.as_ref(), "Unexpected pipeid with DualFds")
+            }
+            Err(other) => unreachable!("{other}"),
+        }
+    }
+
+    #[test]
+    fn test_new_from_raw_values_error_no_fd_with_pipeid() {
+        let fds: Vec<OwnedFd> = vec![];
+        match FinishPipe::from_reply(fds, 1) {
+            Ok(v) => unreachable!("{v:?}"),
+            Err(Error::Other(msg)) => {
+                assert_eq!(msg.as_ref(), "Expected exactly one fd for FinishPipe")
+            }
+            Err(other) => unreachable!("{other}"),
+        }
     }
 }
