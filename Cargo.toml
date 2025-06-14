@@ -5,7 +5,7 @@ license = "MIT OR Apache-2.0"
 name = "containers-image-proxy"
 readme = "README.md"
 repository = "https://github.com/containers/containers-image-proxy-rs"
-version = "0.7.1"
+version = "0.8.0"
 rust-version = "1.70.0"
 
 [dependencies]
@@ -13,7 +13,7 @@ fn-error-context = "0.2.0"
 futures-util = "0.3.13"
 # NOTE when bumping this in a semver-incompatible way, because we re-export it you
 # must also bump the semver of this project.
-oci-spec = "0.7.0"
+oci-spec = "0.8.0"
 rustix = { version = "1.0", features = ["process", "fs", "net"] }
 serde = { features = ["derive"], version = "1.0.125" }
 serde_json = "1.0.64"
