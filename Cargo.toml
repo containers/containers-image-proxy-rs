@@ -9,7 +9,6 @@ version = "0.8.0"
 rust-version = "1.70.0"
 
 [dependencies]
-fn-error-context = "0.2.0"
 futures-util = "0.3.13"
 # NOTE when bumping this in a semver-incompatible way, because we re-export it you
 # must also bump the semver of this project.
